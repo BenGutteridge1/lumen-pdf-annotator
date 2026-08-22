@@ -1,0 +1,24 @@
+{
+  "name": "lumen-pdf-annotator",
+  "version": "0.6.1",
+  "private": true,
+  "description": "A performance-first, native-feeling PDF reader and annotator for Obsidian.",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
+    "typecheck": "tsc -noEmit -skipLibCheck"
+  },
+  "keywords": [
+    "obsidian-plugin"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "esbuild": "^0.25.0",
+    "obsidian": "latest",
+    "typescript": "^5.4.0"
+  },
+  "dependencies": {
+    "pdfjs-dist": "4.10.38"
+  }
+}
