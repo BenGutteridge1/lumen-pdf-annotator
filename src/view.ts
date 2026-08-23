@@ -607,7 +607,7 @@ export class LumenPdfView extends FileView {
     // Reading a custom property returns its unresolved var() expression. Resolve
     // it on a neutral probe before PDF theme classes can replace its HSL inputs.
     const probe = document.body.createSpan({ cls: "lumen-accent-probe" });
-    probe.style.color = "var(--interactive-accent)";
+    probe.setCssProps({ color: "var(--interactive-accent)" });
     const accent = getComputedStyle(probe).color;
     probe.remove();
     return accent;

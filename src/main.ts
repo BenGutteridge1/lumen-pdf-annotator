@@ -1,4 +1,4 @@
-import { FuzzySuggestModal, normalizePath, Notice, ObsidianProtocolData, Plugin, PluginSettingTab, Setting, TFile, WorkspaceLeaf } from "obsidian";
+import { FuzzySuggestModal, normalizePath, Notice, ObsidianProtocolData, Platform, Plugin, PluginSettingTab, Setting, TFile, WorkspaceLeaf } from "obsidian";
 import { LUMEN_PROTOCOL_ACTION } from "./links";
 import { disposePdfRuntime } from "./pdf-runtime";
 import { BundleInfo, listBundles, restoreBundle, verifyBundle } from "./storage";
@@ -158,7 +158,7 @@ export default class LumenPdfPlugin extends Plugin {
   }
 
   private routeReaderHotkey(event: KeyboardEvent): void {
-    const primary = navigator.platform.includes("Mac") ? event.metaKey : event.ctrlKey;
+    const primary = Platform.isMacOS ? event.metaKey : event.ctrlKey;
     if (!primary || event.altKey) return;
     const key = event.key.toLowerCase();
     let view = this.app.workspace.getActiveViewOfType(LumenPdfView);
