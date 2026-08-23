@@ -1,389 +1,281 @@
-import {
-  FuzzySuggestModal,
-  Notice,
-  Plugin,
-  PluginSettingTab,
-  Setting,
-  TFile,
-  WorkspaceLeaf,
-} from "obsidian";
-import {
-  PdfAnnotatorView,
-  VIEW_TYPE_PDF_ANNOTATOR,
-  type PdfTheme,
-} from "./view";
-import { disposePdfEngine, initPdfEngine, LOG_TAG } from "./pdf-engine";
-import {
-  DEFAULT_ANNOTATION_FOLDER,
-  normalizeAnnotationStorageFolder,
-  type AnnotationPathOptions,
-  type AnnotationStorageMode,
-} from "./annotations";
-import {
-  DEFAULT_RECOVERY_FOLDER,
-  PDF_BUNDLE_LIBRARY,
-  PdfBundleManager,
-  type PdfBundleBinding,
-} from "./bundles";
-import { pdfHotkeyAction, pickPdfHotkeyTarget } from "./hotkeys";
+import { FuzzySuggestModal, normalizePath, Notice, ObsidianProtocolData, Plugin, PluginSettingTab, Setting, TFile, WorkspaceLeaf } from "obsidian";
+import { LUMEN_PROTOCOL_ACTION } from "./links";
+import { disposePdfRuntime } from "./pdf-runtime";
+import { BundleInfo, listBundles, restoreBundle, verifyBundle } from "./storage";
+import { LumenPdfView, LUMEN_VIEW_TYPE, PdfTheme } from "./view";
 
 interface LumenSettings {
-  registerAsDefaultPdfHandler: boolean;
-  annotationStorageMode: AnnotationStorageMode;
-  annotationStorageFolder: string;
+  defaultViewer: boolean;
   pdfTheme: PdfTheme;
+  legacyAnnotationFolder: string;
 }
 
-const DEFAULT_SETTINGS: LumenSettings = {
-  registerAsDefaultPdfHandler: false,
-  annotationStorageMode: "folder",
-  annotationStorageFolder: DEFAULT_ANNOTATION_FOLDER,
-  pdfTheme: "light",
-};
+const DEFAULT_SETTINGS: LumenSettings = { defaultViewer: true, pdfTheme: "light", legacyAnnotationFolder: "PDF annotations" };
 
-function coerceTheme(value: unknown): PdfTheme {
-  if (value === "dark" || value === "night") return "dark";
-  if (value === "sepia") return "sepia";
-  return "light";
+interface ViewRegistryWithExtensions {
+  typeByExtension: Record<string, string>;
 }
 
 export default class LumenPdfPlugin extends Plugin {
-  settings!: LumenSettings;
-  bundleManager!: PdfBundleManager;
-  private replacingCorePdfView = false;
-  private lastPdfLeaf: WorkspaceLeaf | null = null;
+  settings: LumenSettings = DEFAULT_SETTINGS;
+  private mostRecentPdfPath: string | null = null;
+  private settingsWrite: Promise<void> = Promise.resolve();
 
   async onload(): Promise<void> {
-    await this.loadSettings();
-    this.bundleManager = new PdfBundleManager(this.app);
-    const status = initPdfEngine();
-    if (!status.ok) new Notice("Lumen PDF: pdf.js worker check failed — see console.");
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    if (!["light", "sepia", "dark"].includes(this.settings.pdfTheme)) this.settings.pdfTheme = DEFAULT_SETTINGS.pdfTheme;
+    this.registerView(LUMEN_VIEW_TYPE, leaf => new LumenPdfView(
+      leaf,
+      this.settings.pdfTheme,
+      theme => void this.setPdfTheme(theme).catch(error => {
+        console.error("Lumen could not save the PDF theme", error);
+        new Notice("Lumen could not save the PDF theme. Your current document will keep using it until reload.");
+      }),
+      this.settings.legacyAnnotationFolder,
+    ));
+    if (this.settings.defaultViewer) this.installAsDefaultPdfViewer();
+    this.registerEvent(this.app.workspace.on("file-open", file => {
+      if (file?.extension.toLowerCase() === "pdf") this.mostRecentPdfPath = file.path;
+    }));
+    this.registerDomEvent(window, "keydown", event => this.routeReaderHotkey(event), true);
+    this.registerObsidianProtocolHandler(LUMEN_PROTOCOL_ACTION, params => void this.openAnnotationLink(params).catch(error => {
+      console.error("Lumen could not open an annotation link", error);
+      new Notice("Lumen could not open this annotation link.");
+    }));
 
-    this.registerView(VIEW_TYPE_PDF_ANNOTATOR, (leaf: WorkspaceLeaf) => {
-      this.lastPdfLeaf = leaf;
-      return new PdfAnnotatorView(
-        leaf,
-        () => this.annotationPathOptions(),
-        this.bundleManager,
-        () => this.settings.pdfTheme,
-        (theme) => void this.setTheme(theme)
-      );
-    });
     this.addCommand({
-      id: "open-current-pdf-in-annotator",
+      id: "open-current-pdf-in-lumen",
       name: "Open current PDF in Lumen annotator",
-      checkCallback: (checking) => {
+      checkCallback: checking => {
         const file = this.app.workspace.getActiveFile();
-        const available = file instanceof TFile && file.extension === "pdf";
-        if (available && !checking) void this.openInAnnotator(file, "tab");
-        return available;
-      },
-    });
-
-    this.addCommand({
-      id: "import-legacy-annotations",
-      name: "Import legacy annotations for this PDF",
-      checkCallback: (checking) => {
-        const view = this.app.workspace.getActiveViewOfType(PdfAnnotatorView);
-        if (!view?.file) return false;
-        if (!checking) void view.importLegacyAnnotations();
+        if (!(file instanceof TFile) || file.extension.toLowerCase() !== "pdf") return false;
+        if (!checking) void this.openFile(file);
         return true;
       },
     });
-
-    this.addCommand({
-      id: "export-current-pdf-annotations",
-      name: "Export annotations for current PDF",
-      checkCallback: (checking) => {
-        const file = this.app.workspace.getActiveFile();
-        if (!(file instanceof TFile) || file.extension !== "pdf") return false;
-        if (!checking) void this.exportAnnotations(file);
-        return true;
-      },
+    this.addReaderCommand("toggle-pdf-search", "Toggle PDF search", view => view.toggleSearch());
+    this.addReaderCommand("toggle-annotation-inspector", "Toggle annotation inspector", view => view.toggleInspector());
+    this.addReaderCommand("previous-pdf-page", "Previous PDF page", view => view.previousPage());
+    this.addReaderCommand("next-pdf-page", "Next PDF page", view => view.nextPage());
+    this.addReaderCommand("zoom-pdf-in", "Zoom PDF in", view => view.zoomIn());
+    this.addReaderCommand("zoom-pdf-out", "Zoom PDF out", view => view.zoomOut());
+    this.addReaderCommand("reset-pdf-zoom", "Reset PDF zoom", view => view.resetZoom());
+    this.addReaderCommand("place-page-note", "Place a page note", view => view.togglePageNotePlacement());
+    this.addReaderCommand("checkpoint-annotations", "Save an annotation checkpoint", async view => {
+      await view.checkpointAnnotations();
+      new Notice("Lumen annotation checkpoint saved.");
     });
-
-    this.addCommand({
-      id: "restore-backed-up-pdf",
-      name: "Restore a PDF from annotation backup",
-      callback: async () => {
-        const bundles = await this.bundleManager.listBundles();
-        if (!bundles.length) return void new Notice("Lumen PDF: no managed PDF backups found.");
-        new PdfBackupRestoreModal(this, bundles).open();
-      },
+    this.addReaderCommand("export-annotations", "Export annotations for this PDF", async view => {
+      const path = await view.exportAnnotations();
+      if (path) new Notice(`Annotations exported to ${path}`);
     });
-
-    this.addCommand({
-      id: "verify-pdf-annotation-backups",
-      name: "Verify all PDF annotation backups",
-      callback: () => void this.verifyBackups(),
-    });
-
-    this.registerReaderHotkeys();
-    // Window capture runs before Obsidian's document-level find accelerator.
-    // If any Lumen PDF is open, Cmd/Ctrl+F belongs to that reader even when
-    // focus is in the file tree, annotation rail, another pane, or an input.
-    this.registerDomEvent(window, "keydown", (evt) => this.onGlobalKeyDown(evt), true);
-
-    this.registerEvent(this.app.workspace.on("file-open", (file) => {
-      if (file instanceof TFile && file.extension === "pdf") void this.openPdfClickInAnnotator(file);
-    }));
-    this.registerEvent(this.app.workspace.on("active-leaf-change", (leaf) => {
-      if (leaf?.view instanceof PdfAnnotatorView) this.lastPdfLeaf = leaf;
-      if (!this.settings.registerAsDefaultPdfHandler || !leaf || leaf.view.getViewType() !== "pdf") return;
-      const file = (leaf.view as { file?: unknown }).file;
-      if (file instanceof TFile && file.extension === "pdf") void this.openPdfClickInAnnotator(file);
-    }));
-    this.registerEvent(this.app.vault.on("rename", (file, oldPath) => {
-      if (!(file instanceof TFile) || file.extension !== "pdf") return;
-      void this.bundleManager.onPdfRenamed(file, oldPath);
-      for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_PDF_ANNOTATOR)) {
-        if (leaf.view instanceof PdfAnnotatorView) leaf.view.syncPdfPath(file);
-      }
-    }));
-    this.registerEvent(this.app.vault.on("delete", (file) => {
-      if (file instanceof TFile && file.extension === "pdf") void this.bundleManager.onPdfDeleted(file.path);
-    }));
-
+    this.addReaderCommand("import-legacy-annotations", "Import legacy annotations for this PDF", view => view.importLegacyAnnotations(true));
+    this.addCommand({ id: "verify-pdf-backups", name: "Verify all PDF backup checksums", callback: () => void this.verifyAllBackups() });
+    this.addCommand({ id: "restore-backed-up-pdf", name: "Restore a backed-up PDF", callback: () => void this.chooseBackupToRestore() });
     this.addSettingTab(new LumenSettingTab(this));
-    console.log(`${LOG_TAG} Lumen PDF 0.6.1 loaded.`);
   }
 
   onunload(): void {
-    this.app.workspace.getLeavesOfType(VIEW_TYPE_PDF_ANNOTATOR).forEach((leaf) => leaf.detach());
-    disposePdfEngine();
+    disposePdfRuntime();
   }
 
-  async openInAnnotator(file: TFile, paneType: "tab" | "split" | false = "tab"): Promise<void> {
-    const leaf = this.findLeaf(file) ?? this.app.workspace.getLeaf(paneType);
-    await leaf.setViewState({ type: VIEW_TYPE_PDF_ANNOTATOR, state: { file: file.path }, active: true });
-    this.lastPdfLeaf = leaf;
-    this.app.workspace.setActiveLeaf(leaf, { focus: true });
-  }
-
-  private registerReaderHotkeys(): void {
-    this.addCommand({
-      id: "toggle-pdf-search",
-      name: "Toggle PDF search",
-      checkCallback: (checking) => this.runOnPdfView(checking, true, (view) => view.togglePdfSearch()),
-    });
-    this.addCommand({
-      id: "toggle-annotation-inspector",
-      name: "Toggle annotation inspector",
-      checkCallback: (checking) => this.runOnPdfView(checking, false, (view) => view.toggleAnnotationInspector()),
-    });
-    this.addCommand({
-      id: "previous-pdf-page",
-      name: "Previous PDF page",
-      checkCallback: (checking) => this.runOnPdfView(checking, false, (view) => view.previousPdfPage()),
-    });
-    this.addCommand({
-      id: "next-pdf-page",
-      name: "Next PDF page",
-      checkCallback: (checking) => this.runOnPdfView(checking, false, (view) => view.nextPdfPage()),
-    });
-    this.addCommand({
-      id: "zoom-pdf-in",
-      name: "Zoom PDF in",
-      checkCallback: (checking) => this.runOnPdfView(checking, false, (view) => view.zoomPdfIn()),
-    });
-    this.addCommand({
-      id: "zoom-pdf-out",
-      name: "Zoom PDF out",
-      checkCallback: (checking) => this.runOnPdfView(checking, false, (view) => view.zoomPdfOut()),
-    });
-    this.addCommand({
-      id: "reset-pdf-zoom",
-      name: "Reset PDF zoom",
-      checkCallback: (checking) => this.runOnPdfView(checking, false, (view) => view.resetPdfZoom()),
-    });
-    this.addCommand({
-      id: "toggle-page-note-placement",
-      name: "Toggle page-note placement",
-      checkCallback: (checking) => this.runOnPdfView(checking, false, (view) => view.togglePageNotePlacement()),
+  private installAsDefaultPdfViewer(): void {
+    // Obsidian reserves the PDF extension for its built-in view, so
+    // registerExtensions() rejects it. Preserve and restore the exact prior
+    // mapping instead of deleting or permanently mutating the core handler.
+    const registry = (this.app as unknown as { viewRegistry: ViewRegistryWithExtensions }).viewRegistry;
+    const previous = registry.typeByExtension.pdf;
+    registry.typeByExtension.pdf = LUMEN_VIEW_TYPE;
+    this.register(() => {
+      if (registry.typeByExtension.pdf === LUMEN_VIEW_TYPE) registry.typeByExtension.pdf = previous;
     });
   }
 
-  private openPdfLeaves(): WorkspaceLeaf[] {
-    return this.app.workspace
-      .getLeavesOfType(VIEW_TYPE_PDF_ANNOTATOR)
-      .filter((leaf) => leaf.view instanceof PdfAnnotatorView);
+  private addReaderCommand(
+    id: string,
+    name: string,
+    action: (view: LumenPdfView) => void | Promise<unknown>,
+  ): void {
+    this.addCommand({
+      id,
+      name,
+      checkCallback: checking => {
+        const view = this.app.workspace.getActiveViewOfType(LumenPdfView);
+        if (!view) return false;
+        if (!checking) void Promise.resolve(action(view)).catch(error => {
+          console.error("Lumen command failed", error);
+          new Notice(`Lumen could not complete the command: ${error instanceof Error ? error.message : String(error)}`);
+        });
+        return true;
+      },
+    });
   }
 
-  private pdfHotkeyTarget(allowBackground: boolean): { leaf: WorkspaceLeaf; view: PdfAnnotatorView } | null {
-    const leaves = this.openPdfLeaves();
-    const active = this.app.workspace.activeLeaf;
-    const activePdf = active?.view instanceof PdfAnnotatorView ? active : null;
-    const leaf = allowBackground
-      ? pickPdfHotkeyTarget(activePdf, this.lastPdfLeaf, leaves)
-      : pickPdfHotkeyTarget(activePdf, null, leaves.filter((candidate) => candidate === activePdf));
-    if (!leaf || !(leaf.view instanceof PdfAnnotatorView)) return null;
-    return { leaf, view: leaf.view };
+  private async openFile(file: TFile, leaf = this.app.workspace.getLeaf(false) as WorkspaceLeaf): Promise<LumenPdfView | null> {
+    this.mostRecentPdfPath = file.path;
+    await leaf.setViewState({ type: LUMEN_VIEW_TYPE, active: true, state: { file: file.path } });
+    this.app.workspace.revealLeaf(leaf);
+    return leaf.view instanceof LumenPdfView ? leaf.view : null;
   }
 
-  private runOnPdfView(
-    checking: boolean,
-    allowBackground: boolean,
-    action: (view: PdfAnnotatorView) => void
-  ): boolean {
-    const target = this.pdfHotkeyTarget(allowBackground);
-    if (!target) return false;
-    if (!checking) {
-      this.lastPdfLeaf = target.leaf;
-      if (this.app.workspace.activeLeaf !== target.leaf) {
-        this.app.workspace.setActiveLeaf(target.leaf, { focus: true });
-      }
-      action(target.view);
-    }
-    return true;
-  }
-
-  private onGlobalKeyDown(event: KeyboardEvent): void {
-    const action = pdfHotkeyAction(event);
-    if (!action) return;
-    const target = this.pdfHotkeyTarget(action === "toggle-search");
-    if (!target) return;
-    event.preventDefault();
-    event.stopPropagation();
-    event.stopImmediatePropagation();
-    this.lastPdfLeaf = target.leaf;
-    if (this.app.workspace.activeLeaf !== target.leaf) {
-      this.app.workspace.setActiveLeaf(target.leaf, { focus: true });
-    }
-    if (action === "toggle-search") target.view.togglePdfSearch();
-    else if (action === "toggle-inspector") target.view.toggleAnnotationInspector();
-    else if (action === "zoom-in") target.view.zoomPdfIn();
-    else if (action === "zoom-out") target.view.zoomPdfOut();
-    else target.view.resetPdfZoom();
-  }
-
-  async setTheme(theme: PdfTheme): Promise<void> {
-    this.settings.pdfTheme = theme;
-    await this.saveData(this.settings);
-    for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_PDF_ANNOTATOR)) {
-      if (leaf.view instanceof PdfAnnotatorView) leaf.view.setPdfTheme(theme);
-    }
-  }
-
-  annotationPathOptions(): AnnotationPathOptions {
-    return {
-      storageMode: this.settings.annotationStorageMode,
-      storageFolder: this.settings.annotationStorageFolder,
-    };
-  }
-
-  private findLeaf(file: TFile): WorkspaceLeaf | null {
-    for (const type of [VIEW_TYPE_PDF_ANNOTATOR, "pdf"]) {
-      for (const leaf of this.app.workspace.getLeavesOfType(type)) {
-        const leafFile = (leaf.view as { file?: unknown }).file;
-        if (leafFile instanceof TFile && leafFile.path === file.path) return leaf;
-      }
-    }
-    return null;
-  }
-
-  private async openPdfClickInAnnotator(file: TFile): Promise<void> {
-    if (!this.settings.registerAsDefaultPdfHandler || this.replacingCorePdfView) return;
-    for (const delay of [0, 24, 80, 180, 360, 720, 1_200]) {
-      await new Promise((resolve) => window.setTimeout(resolve, delay));
-      const leaf = this.app.workspace.activeLeaf;
-      if (!leaf) continue;
-      const activePath = this.app.workspace.getActiveFile()?.path;
-      const leafPath = ((leaf.view as { file?: unknown }).file as TFile | undefined)?.path;
-      if (activePath !== file.path && leafPath !== file.path) continue;
-      if (leaf.view.getViewType() === VIEW_TYPE_PDF_ANNOTATOR) return;
-      this.replacingCorePdfView = true;
-      try {
-        await leaf.setViewState({ type: VIEW_TYPE_PDF_ANNOTATOR, state: { file: file.path }, active: true });
-      } finally {
-        this.replacingCorePdfView = false;
-      }
+  private async openAnnotationLink(params: ObsidianProtocolData): Promise<void> {
+    if (params.vault && params.vault !== this.app.vault.getName()) {
+      new Notice(`This Lumen link belongs to the “${params.vault}” vault.`);
       return;
     }
-  }
-
-  private async exportAnnotations(file: TFile): Promise<void> {
-    try {
-      await this.app.workspace.getActiveViewOfType(PdfAnnotatorView)?.checkpointAnnotations();
-      const path = await this.bundleManager.exportAnnotations(file, `${this.settings.annotationStorageFolder}/Exports`);
-      new Notice(`Lumen PDF: exported ${path}`);
-    } catch (error: any) {
-      console.error(`${LOG_TAG} annotation export failed`, error);
-      new Notice(`Lumen PDF: export failed — ${error?.message ?? error}`);
+    if (!params.file || !params.annotation) {
+      new Notice("This Lumen highlight link is incomplete.");
+      return;
+    }
+    const exactPath = normalizePath(params.file);
+    const legacyPath = normalizePath(params.file.replace(/\+/g, " "));
+    const target = this.app.vault.getAbstractFileByPath(exactPath)
+      ?? (legacyPath !== exactPath ? this.app.vault.getAbstractFileByPath(legacyPath) : null);
+    if (!(target instanceof TFile) || target.extension.toLowerCase() !== "pdf") {
+      new Notice("The PDF for this Lumen highlight link could not be found.");
+      return;
+    }
+    const leaf = this.app.workspace.getLeaf("tab") as WorkspaceLeaf;
+    const view = await this.openFile(target, leaf);
+    if (!view || !(await view.revealAnnotation(params.annotation))) {
+      new Notice("The linked highlight could not be found in this PDF.");
     }
   }
 
-  private async verifyBackups(): Promise<void> {
-    const bundles = await this.bundleManager.listBundles();
-    if (!bundles.length) return void new Notice("Lumen PDF: no managed PDF backups found.");
-    let failed = 0;
-    for (const bundle of bundles) if (!(await this.bundleManager.verifyBundle(bundle)).ok) failed++;
-    new Notice(failed ? `Lumen PDF: ${failed} backup checks failed — see console.` : `Lumen PDF: verified ${bundles.length} backups.`);
+  async setPdfTheme(theme: PdfTheme): Promise<void> {
+    this.settings.pdfTheme = theme;
+    for (const leaf of this.app.workspace.getLeavesOfType(LUMEN_VIEW_TYPE)) {
+      if (leaf.view instanceof LumenPdfView) leaf.view.setTheme(theme);
+    }
+    await this.saveSettings();
   }
 
-  private async loadSettings(): Promise<void> {
-    const saved = (await this.loadData()) ?? {};
-    this.settings = {
-      ...DEFAULT_SETTINGS,
-      ...saved,
-      annotationStorageMode: saved.annotationStorageMode === "beside-pdf" ? "beside-pdf" : "folder",
-      annotationStorageFolder: normalizeAnnotationStorageFolder(saved.annotationStorageFolder),
-      pdfTheme: coerceTheme(saved.pdfTheme),
-    };
+  saveSettings(): Promise<void> {
+    const snapshot = { ...this.settings };
+    const write = this.settingsWrite.catch(() => undefined).then(() => this.saveData(snapshot));
+    this.settingsWrite = write;
+    return write;
+  }
+
+  private routeReaderHotkey(event: KeyboardEvent): void {
+    const primary = navigator.platform.includes("Mac") ? event.metaKey : event.ctrlKey;
+    if (!primary || event.altKey) return;
+    const key = event.key.toLowerCase();
+    let view = this.app.workspace.getActiveViewOfType(LumenPdfView);
+    if (key === "f" && !event.shiftKey && !view) {
+      const recentLeaf = this.app.workspace.getLeavesOfType(LUMEN_VIEW_TYPE).at(-1);
+      if (recentLeaf?.view instanceof LumenPdfView) {
+        this.app.workspace.revealLeaf(recentLeaf);
+        view = recentLeaf.view;
+      } else {
+        const file = this.mostRecentPdfPath ? this.app.vault.getAbstractFileByPath(this.mostRecentPdfPath) : this.app.workspace.getActiveFile();
+        if (file instanceof TFile && file.extension.toLowerCase() === "pdf") {
+          event.preventDefault();
+          event.stopImmediatePropagation();
+          void this.openFile(file).then(() => this.app.workspace.getActiveViewOfType(LumenPdfView)?.toggleSearch());
+        }
+        return;
+      }
+    }
+    if (!view) return;
+    if (key === "f" && !event.shiftKey) {
+      event.preventDefault(); event.stopImmediatePropagation(); view.toggleSearch();
+    } else if (key === "a" && event.shiftKey) {
+      event.preventDefault(); event.stopImmediatePropagation(); view.toggleInspector();
+    } else if (key === "=" || key === "+") {
+      event.preventDefault(); view.zoomIn();
+    } else if (key === "-") {
+      event.preventDefault(); view.zoomOut();
+    } else if (key === "0") {
+      event.preventDefault(); view.resetZoom();
+    }
+  }
+
+  private async verifyAllBackups(): Promise<void> {
+    const bundles = await listBundles(this.app.vault);
+    if (!bundles.length) {
+      new Notice("No Lumen PDF backups found.");
+      return;
+    }
+    let valid = 0;
+    const failures: string[] = [];
+    for (const bundle of bundles) {
+      const result = await verifyBundle(this.app.vault, bundle);
+      if (result.ok) valid++;
+      else failures.push(`${bundle.manifest.originalName}: ${result.reason ?? "verification failed"}`);
+      await new Promise<void>(resolve => window.setTimeout(resolve, 0));
+    }
+    if (failures.length) {
+      console.error("Lumen backup verification failures", failures);
+      new Notice(`${valid}/${bundles.length} PDF backups verified. ${failures.length} failed; details are in the developer console.`, 8000);
+    } else {
+      new Notice(`All ${valid} PDF backup${valid === 1 ? "" : "s"} verified.`);
+    }
+  }
+
+  private async chooseBackupToRestore(): Promise<void> {
+    const bundles = await listBundles(this.app.vault);
+    if (!bundles.length) {
+      new Notice("No Lumen PDF backups found.");
+      return;
+    }
+    new BackupRestoreModal(this, bundles).open();
+  }
+}
+
+class BackupRestoreModal extends FuzzySuggestModal<BundleInfo> {
+  constructor(private readonly plugin: LumenPdfPlugin, private readonly bundles: BundleInfo[]) {
+    super(plugin.app);
+    this.setPlaceholder("Choose a PDF backup to restore");
+  }
+
+  getItems(): BundleInfo[] { return this.bundles; }
+  getItemText(item: BundleInfo): string { return `${item.manifest.originalName} — ${item.manifest.workingPath}`; }
+  async onChooseItem(item: BundleInfo): Promise<void> {
+    try {
+      const file = await restoreBundle(this.plugin.app.vault, item);
+      new Notice(`Restored ${file.path}`);
+      await this.plugin.app.workspace.getLeaf(true).openFile(file);
+    } catch (error) {
+      console.error("Lumen restore failed", error);
+      new Notice(`Restore failed: ${error instanceof Error ? error.message : String(error)}`, 8000);
+    }
   }
 }
 
 class LumenSettingTab extends PluginSettingTab {
-  constructor(private plugin: LumenPdfPlugin) {
+  constructor(private readonly plugin: LumenPdfPlugin) {
     super(plugin.app, plugin);
   }
 
   display(): void {
-    const { containerEl } = this;
-    containerEl.empty();
-    containerEl.createEl("h2", { text: "Lumen PDF" });
-    new Setting(containerEl)
+    this.containerEl.empty();
+    new Setting(this.containerEl)
       .setName("Make Lumen the default PDF viewer")
-      .setDesc("Open ordinary PDF clicks in the fast annotator view.")
-      .addToggle((toggle) => toggle.setValue(this.plugin.settings.registerAsDefaultPdfHandler).onChange(async (value) => {
-        this.plugin.settings.registerAsDefaultPdfHandler = value;
-        await this.plugin.saveData(this.plugin.settings);
+      .setDesc("Open PDFs in Lumen after the next Obsidian restart.")
+      .addToggle(toggle => toggle.setValue(this.plugin.settings.defaultViewer).onChange(async value => {
+        this.plugin.settings.defaultViewer = value;
+        await this.plugin.saveSettings();
+        new Notice("Restart Obsidian to apply the PDF viewer change.");
       }));
-    new Setting(containerEl)
+    new Setting(this.containerEl)
       .setName("PDF theme")
-      .setDesc("Choose the initial paper appearance. It can also be changed from the reader toolbar.")
-      .addDropdown((dropdown) => dropdown
-        .addOption("light", "Light")
-        .addOption("sepia", "Sepia")
-        .addOption("dark", "Dark")
+      .setDesc("Use this document theme for every Lumen reader.")
+      .addDropdown(dropdown => dropdown
+        .addOptions({ light: "Light", sepia: "Sepia", dark: "Dark" })
         .setValue(this.plugin.settings.pdfTheme)
-        .onChange((value) => this.plugin.setTheme(coerceTheme(value))));
-    new Setting(containerEl)
+        .onChange(async value => {
+          await this.plugin.setPdfTheme(value as PdfTheme);
+        }));
+    new Setting(this.containerEl)
       .setName("Legacy annotation folder")
-      .setDesc(`Existing path-based sidecars are imported from this folder. Managed data remains in ${PDF_BUNDLE_LIBRARY}.`)
-      .addText((text) => text.setValue(this.plugin.settings.annotationStorageFolder).onChange(async (value) => {
-        this.plugin.settings.annotationStorageFolder = normalizeAnnotationStorageFolder(value);
-        await this.plugin.saveData(this.plugin.settings);
-      }));
-  }
-}
-
-class PdfBackupRestoreModal extends FuzzySuggestModal<PdfBundleBinding> {
-  constructor(private plugin: LumenPdfPlugin, private bundles: PdfBundleBinding[]) {
-    super(plugin.app);
-    this.setPlaceholder("Choose a backed-up PDF to restore");
-  }
-  getItems(): PdfBundleBinding[] { return this.bundles; }
-  getItemText(binding: PdfBundleBinding): string {
-    return `${binding.manifest.originalName} — ${binding.manifest.currentPath ?? "working copy deleted"}`;
-  }
-  onChooseItem(binding: PdfBundleBinding): void { void this.restore(binding); }
-  private async restore(binding: PdfBundleBinding): Promise<void> {
-    try {
-      const file = await this.plugin.bundleManager.restoreBundle(binding, DEFAULT_RECOVERY_FOLDER);
-      new Notice(`Lumen PDF: restored ${file.path}`);
-      await this.plugin.openInAnnotator(file, "tab");
-    } catch (error: any) {
-      new Notice(`Lumen PDF: restore failed — ${error?.message ?? error}`);
-    }
+      .setDesc("Look here for older Markdown annotation notes that target the open PDF.")
+      .addText(text => text
+        .setPlaceholder("PDF annotations")
+        .setValue(this.plugin.settings.legacyAnnotationFolder)
+        .onChange(async value => {
+          this.plugin.settings.legacyAnnotationFolder = value.trim().replace(/^\/+|\/+$/g, "") || "PDF annotations";
+          await this.plugin.saveSettings();
+        }));
   }
 }
