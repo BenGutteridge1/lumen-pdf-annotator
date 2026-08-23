@@ -1,15 +1,13 @@
 # Third-party notices
 
-## Mozilla PDF.js
+Lumen PDF Annotator bundles the following runtime dependency:
 
-Lumen PDF Annotator bundles `pdfjs-dist` 4.10.38, the distribution package for
-Mozilla PDF.js.
+## PDF.js
 
-- Project: https://github.com/mozilla/pdf.js
-- Copyright: Mozilla and PDF.js contributors
+- Project: [Mozilla PDF.js](https://github.com/mozilla/pdf.js)
+- Distributed package: `pdfjs-dist` 4.10.38
+- Copyright: Mozilla Foundation and PDF.js contributors
 - License: Apache License 2.0
-- License text: https://www.apache.org/licenses/LICENSE-2.0
+- License text: [Apache License 2.0](licenses/Apache-2.0.txt)
 
-The build disables PDF.js dynamic script loading, Node.js fallback loading, and
-runtime code generation before bundling it for the offline Obsidian plugin.
-Those build-time changes are documented in `esbuild.config.mjs`.
+PDF.js is bundled locally so Lumen can render PDFs without downloading executable code at runtime. Its evaluation-based optimization probes are disabled during the production build to comply with Obsidian's plugin requirements.

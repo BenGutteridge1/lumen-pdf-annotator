@@ -1,194 +1,124 @@
-<h1 align="center">Lumen PDF Annotator</h1>
+# Lumen PDF Annotator
 
-<p align="center">
-  A fast, local-first PDF reader and annotator for Obsidian.
-</p>
+Read, search, highlight, and annotate PDFs inside Obsidian with a calm interface designed to stay out of the document's way.
 
-<p align="center">
-  <a href="https://github.com/BenGutteridge1/lumen-pdf-annotator/releases"><img alt="Latest release" src="https://img.shields.io/github/v/release/BenGutteridge1/lumen-pdf-annotator?label=release"></a>
-  <a href="https://github.com/BenGutteridge1/lumen-pdf-annotator/actions/workflows/release.yml"><img alt="Release build" src="https://github.com/BenGutteridge1/lumen-pdf-annotator/actions/workflows/release.yml/badge.svg"></a>
-  <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
-  <img alt="Desktop only" src="https://img.shields.io/badge/Obsidian-desktop%20only-7c3aed">
-</p>
+![Lumen PDF Annotator showing its compact floating toolbar](assets/lumen-reader.jpeg)
 
-<p align="center">
-  <a href="#quick-start">Quick start</a> ·
-  <a href="#reader-and-annotation-features">Features</a> ·
-  <a href="#performance-architecture">Performance</a> ·
-  <a href="#storage-and-recovery">Storage</a> ·
-  <a href="https://github.com/BenGutteridge1/lumen-pdf-annotator/issues">Report a problem</a>
-</p>
+Lumen is a desktop-first PDF reader for research-heavy vaults. It combines document themes, contextual full-PDF search, fast text markup, searchable notes, and local recovery files without modifying the source PDF or sending its contents anywhere.
 
-Lumen provides a clean, floating interface for searching PDFs, marking passages,
-and writing notes without leaving Obsidian. PDFs, annotations, journals, and
-recovery copies remain local to the vault; the plugin has no telemetry and does
-not require an account or remote service.
+## What it feels like
 
-> [!NOTE]
-> Lumen is a desktop-only plugin for Obsidian 1.13.7 or newer. Its Community
-> Plugins listing is pending; the latest GitHub release can be installed
-> manually or through BRAT in the meantime.
+- A compact floating toolbar with direct page entry, nearby previous/next controls, zoom, search, annotations, and light/sepia/dark themes.
+- An immediate selection palette—no hover step—with independently selectable colour and mark type, followed by one explicit Apply action. Seven mark types are included: highlight, underline, dashed underline, dotted underline, strike-through, box, and comment.
+- A floating PDF search that shows long, left-aligned excerpts so results make sense before you open them.
+- A virtualized annotation inspector with bright colour edges, readable quotes, notes, and one-click navigation.
+- A full editor for each saved mark, including colour, style, note, tags, copy, and delete.
+- Right-click any saved highlight to copy a Markdown link that opens its PDF, page, and exact annotation from another note.
+- Extend an existing text annotation from its editor; additional selections can be on the same page, a different page, or span a page boundary while remaining one logical annotation.
+- Click-to-place page notes, readable exports, checksum verification, and recovery from the local PDF backup.
 
-## Why Lumen
+| Contextual PDF search | Individual annotation editor |
+| --- | --- |
+| ![Search results with page numbers and surrounding text](assets/lumen-pdf-search.jpeg) | ![Expanded annotation editor with colours, styles, note, and tags](assets/lumen-annotation-editor.jpeg) |
 
-- **Responsive with large libraries.** Page rendering is viewport-aware and the
-  annotation list is indexed and virtualized instead of mounting every result.
-- **Made for close reading.** Search, themes, highlights, notes, tags, and
-  individual mark editing stay beside the document in compact floating panels.
-- **Readable, recoverable data.** Notes are checkpointed to Markdown and recent
-  changes are protected by a local append-only journal.
-- **Safe original files.** Lumen never writes annotations into the working PDF.
-  A checksum-addressed recovery copy protects against moves, replacements, and
-  accidental deletion.
+![The virtualized annotation inspector keeps readable cards beside the page](assets/lumen-annotation-inspector.jpeg)
 
-## Quick start
+![The compact selection palette appears as soon as text is selected](assets/lumen-selection-toolbar.jpeg)
 
-1. Install Lumen using one of the methods under [Installation](#installation).
-2. Open a PDF and run **Open current PDF in Lumen annotator** from the command
-   palette, or enable **Make Lumen the default PDF viewer** in Lumen settings.
-3. Select text. The floating palette appears immediately; choose a colour or a
-   mark style, or open the note action.
-4. Click an existing mark to edit its note, tags, colour, or style.
-5. Use `Cmd/Ctrl+F` to search the PDF and `Cmd/Ctrl+Shift+A` to open the
-   searchable annotation inspector.
+The screenshots show the running plugin in Obsidian using an original demo document created for this repository.
 
-## Reader and annotation features
+## Performance by construction
 
-- Light, sepia, and dark PDF themes.
-- Highlight, underline, strike-through, and box annotation styles.
-- Floating selection tools appear immediately after text selection; five pastel
-  colour actions create a highlight in one click, while the style tray, note,
-  copy, and dismiss actions remain compact, flat, and icon-led.
-- Click any existing mark to open its anchored editor.
-- Per-mark colour, style, note, comma-separated tags, copy, inspect, and delete.
-- A floating, searchable annotation rail with All, Highlights, and Notes filters.
-- Richer virtualized annotation cards with page/type metadata, a brighter
-  colour-coded edge, neutral primary note text, and three visible lines each
-  for note and quoted source context when content is available.
-- Compact icon-led toolbar with grouped page and zoom controls; active controls
-  follow Obsidian's configured accent colour.
-- Theme-aware inspector and anchored editor built from the same icon controls.
-- Full-document PDF search from the floating toolbar or `Cmd+F`.
-- Incremental, left-aligned search results with page, match type, a longer
-  primary excerpt, wider nearby context, and exact-term emphasis; clicking a
-  result navigates and flashes the match on the page. Closing search immediately
-  clears its transient PDF hit layer.
-- Clicking an annotation opens a full inspector for source text, note, tags,
-  colour, and mark style. The source block can expand to reveal the complete
-  captured passage.
-- Page navigation and zoom controls.
+Lumen was built around large documents and dense annotation sets rather than optimized after the fact.
 
-## Keyboard shortcuts
+- Only pages near the viewport receive a canvas and selectable text layer; distant pages remain lightweight shells.
+- Canvas rendering is capped at 12 million pixels to avoid runaway memory use at extreme zoom levels.
+- Annotation lookups use ID and page indexes, so drawing a page does not scan the entire collection.
+- Pages with unusually dense markup switch to one bounded canvas overlay with a spatial click index instead of creating thousands of DOM nodes.
+- The inspector mounts only the visible card window plus overscan.
+- Full-document search yields to Obsidian every six pages, can be cancelled, and bounds retained results and mounted cards.
+- Selection capture and current-page tracking use page-range/binary lookup rather than walking every page, while hidden search and inspector panels release their result DOM.
+- Snapshot restore, annotation journals, and checkpoint serialization yield in bounded batches so six-figure loads and saves do not monopolize the UI thread.
+- Each open PDF receives its own bundled, version-matched PDF.js worker.
 
-All actions are exposed in **Settings → Hotkeys**. The built-in defaults use one
-early capture router so each chord executes exactly once. `Cmd/Ctrl+F` can also
-override Obsidian from outside the PDF:
+A private synthetic benchmark used during development inserted and search-indexed 100,000 annotations across 1,000 pages in 90.15 ms, traversed every page bucket in 9.17 ms, and searched all annotations in 13.28 ms on the development machine. A separate extreme run indexed 250,000 annotations across 2,000 pages in 253.49 ms, applied 10,000 edits in 22.91 ms, traversed the page buckets in 23.11 ms, filtered the full collection in 40.27 ms, and sorted it in 8.54 ms. Those figures describe the in-memory index. After cooperative restore yielding was enabled, a separate 100,000-record storage run parsed and search-indexed the snapshot in 467.15 ms total while returning to the host between 1,000-record batches, then produced a 35.2 MB readable checkpoint in 555.98 ms.
+
+The production bundle was also exercised inside Obsidian 1.13.7 with a 455-page PDF and 100,000 temporary annotations. In that run the annotations were inserted in 106.5 ms, the inspector opened in 2.9 ms, only nine annotation cards were mounted, and its capped virtual scroller navigated correctly from the newest record through the midpoint to the end. The temporary records were never queued for persistence and were removed after the run. Results vary by machine and document, but the numbers make the intended scale concrete.
+
+## Local, readable storage
+
+The source PDF is never edited. Lumen hashes its bytes with SHA-256 and stores a recoverable bundle in your vault:
+
+```text
+.lumen-pdf/
+  bundles/
+    sha256/
+      <document-hash>/
+        document.pdf
+        manifest.json
+        annotations.md
+        annotations.previous.md
+        annotations.journal.jsonl
+```
+
+`annotations.md` is a human-readable snapshot. The append-only JSONL journal protects recent changes between checkpoints, while `annotations.previous.md` preserves the last known-good snapshot. Because identity comes from PDF content, annotations remain associated when the original file is renamed or moved.
+
+Everything stays in the vault: no account, telemetry, remote processing, CDN scripts, or dynamic code loading.
+
+## Install
+
+### Obsidian Community Plugins
+
+Once Lumen is accepted into the community directory:
+
+1. Open **Settings → Community plugins → Browse**.
+2. Search for **Lumen PDF Annotator**.
+3. Select **Install**, then **Enable**.
+
+### Manual installation
+
+1. Download `main.js`, `manifest.json`, and `styles.css` from the latest release.
+2. Create `<your-vault>/.obsidian/plugins/lumen-pdf-annotator/`.
+3. Place all three files in that folder.
+4. Reload Obsidian, then enable **Lumen PDF Annotator** under Community plugins.
+
+Lumen currently supports desktop Obsidian 1.13.7 or newer.
+
+## Use
+
+Open any PDF after enabling Lumen. The PDF search and annotation inspector begin closed every time a document opens.
+
+Select text to open the compact markup palette. Choose a colour and mark type in either order, then use the checkmark to apply them or the note icon to apply them and add a note. Nothing is saved merely by choosing a swatch. Click an existing mark or its inspector card to open the individual editor. Use the sticky-note icon or **Place a page note** command to place a note anywhere on a page. PDF search marks every exact match on the rendered page and strengthens the selected result. The toolbar's theme controls affect the reading surface and editor together; the chosen theme persists and Lumen button text and icons follow your Obsidian accent colour in every PDF theme.
+
+Right-click a saved mark and choose **Copy link to highlight**. Paste the resulting Markdown link into any note in the same vault; following it opens the PDF in a new tab, scrolls to the linked annotation, flashes it, and opens its editor. To add more text to a saved annotation, open its editor and use the scan-text icon. Navigate if needed, select the additional text, and confirm the floating **Extend annotation** action. Cross-page segments share colour, style, note, tags, link target, inspector card, and deletion as one annotation.
+
+Default hotkeys:
 
 | Action | macOS | Windows/Linux |
 | --- | --- | --- |
 | Toggle PDF search | `Cmd+F` | `Ctrl+F` |
 | Toggle annotation inspector | `Cmd+Shift+A` | `Ctrl+Shift+A` |
-| Zoom in | `Cmd++` / `Cmd+=` | `Ctrl++` / `Ctrl+=` |
+| Zoom in | `Cmd+Shift+=` | `Ctrl+Shift+=` |
 | Zoom out | `Cmd+-` | `Ctrl+-` |
 | Reset zoom | `Cmd+0` | `Ctrl+0` |
 
-**Previous PDF page**, **Next PDF page**, and **Toggle page-note placement** are
-available as assignable commands without default chords. Directional and Option
-key combinations are left to the user because desktop/Obsidian bindings can
-swallow them. If a Lumen PDF is open, `Cmd/Ctrl+F` activates the active or most
-recently used Lumen reader and toggles its floating search even when focus is
-elsewhere in Obsidian.
+Previous page, next page, page-note placement, annotation checkpoint, export, legacy import, backup verification, recovery, and **Open current PDF in Lumen annotator** are also available in Obsidian's command palette and can be assigned custom hotkeys.
 
-Enable **Make Lumen the default PDF viewer** in plugin settings to redirect
-ordinary PDF clicks to the Lumen view. The command palette action **Open current
-PDF in Lumen annotator** remains available as an explicit route.
+### Backup, export, and migration commands
 
-## Performance architecture
+- **Export annotations for this PDF** writes a readable Markdown file under `.lumen-pdf/exports/`.
+- **Save an annotation checkpoint** immediately compacts the journal into a snapshot.
+- **Verify all PDF backup checksums** checks every local backup against its SHA-256 identity.
+- **Restore a backed-up PDF** verifies the checksum before creating a non-destructive copy under `.lumen-pdf/recovered/`.
+- **Import legacy annotations for this PDF** imports compatible user-owned annotation data when present. Automatic migration is attempted once per document and uses stable IDs to prevent duplicates.
 
-Lumen is designed for large PDFs and large annotation libraries:
+## Settings
 
-- PDF pages are rendered only near the viewport with `IntersectionObserver`.
-- Off-screen canvases and text layers are destroyed to release memory.
-- Rendered canvas size is capped at 12 million pixels per page.
-- The annotation store maintains ID and page indexes for constant-time hot-path
-  lookup instead of rescanning every annotation.
-- The annotation rail uses fixed-height windowing with overscan, so the DOM size
-  follows the viewport rather than the total annotation count.
-- Annotation changes are coalesced into an append-only journal; the readable
-  Markdown snapshot is checkpointed on close, export, or explicit flush.
-- Full-PDF search is cancellable and yields to the UI every six pages.
-- Search results shown in the DOM are capped while the total count continues to
-  be tracked.
+**Make Lumen the default PDF viewer** is enabled initially. Disable it if you want to keep Obsidian's built-in PDF view and open selected PDFs through Lumen's command instead. Restart Obsidian after changing this setting. **PDF theme** sets the persistent light, sepia, or dark reading theme.
 
-Release validation exercises 50,000 annotations, 250,000 indexed ID lookups,
-and 10,000 updates. On the development machine, those indexed operations
-complete in tens of milliseconds rather than scaling with the mounted UI.
+## Contributing
 
-## Storage and recovery
-
-PDF identity is derived from a SHA-256 hash of its bytes. Canonical vault-local
-data is stored under:
-
-```text
-.pdf-annotator/bundles/sha256/<hash>/
-  document.pdf
-  annotations.md
-  annotations.previous.md
-  annotations.journal.jsonl
-  manifest.json
-```
-
-`document.pdf` is a verified byte-for-byte recovery copy. `annotations.md` is a
-human-readable snapshot with a fenced JSON source of truth. The journal protects
-recent edits without forcing a full snapshot rewrite for every keystroke.
-
-Renaming or moving the working PDF does not move its identity bundle. Replacing
-a file with different bytes creates a new bundle, preventing annotations from
-silently attaching to a different document. Commands are included to verify all
-managed backups, restore a deleted or damaged working PDF, export annotations,
-and import legacy sidecars.
-
-## Privacy
-
-Lumen has no telemetry and sends neither PDF content nor annotation content to
-remote services. All data stays inside the Obsidian vault.
-
-## Support and known limits
-
-- Lumen is desktop-only; mobile Obsidian is not supported.
-- Image-only or scanned PDFs need OCR before text selection and search can work.
-- The verified recovery bundle stores another copy of each annotated PDF, so it
-  uses approximately one additional PDF's worth of vault storage.
-- Search keeps at most 2,000 result records and mounts at most 160 cards. The
-  total match count remains accurate.
-- Report reproducible problems through [GitHub Issues](https://github.com/BenGutteridge1/lumen-pdf-annotator/issues).
-  Please do not attach private PDFs, vault data, or annotation content.
-
-## Installation
-
-### Community Plugins
-
-Lumen is being prepared for the Obsidian Community Plugins directory. Until
-the listing is approved, install the latest GitHub release manually or with
-[BRAT](https://github.com/TfTHacker/obsidian42-brat) using this repository URL.
-
-```text
-https://github.com/BenGutteridge1/lumen-pdf-annotator
-```
-
-### Manual installation
-
-Download `main.js`, `manifest.json`, and `styles.css` from the release matching
-the version in `manifest.json`. Place them in:
-
-```text
-<vault>/.obsidian/plugins/lumen-pdf-annotator/
-```
-
-Restart Obsidian, then enable **Lumen PDF Annotator** under **Settings →
-Community plugins**.
-
-## Development
+Issues, feature requests, pull requests, forks, and independent builds are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md) for the development workflow and project boundaries.
 
 ```bash
 npm ci
@@ -196,31 +126,18 @@ npm run typecheck
 npm run build
 ```
 
-The production build is written to `dist/`. Set
-`LUMEN_PDF_ANNOTATOR_PLUGIN_DIR` only when you intentionally want the build
-script to copy release files to a specific local plugin directory.
+The production build is written to `dist/`. For a live development build, set `LUMEN_PDF_ANNOTATOR_PLUGIN_DIR` to a dedicated test-vault plugin directory and run `npm run dev`.
 
-## Release files
+## Scope and roadmap
 
-An Obsidian release contains:
+The first public release is desktop-only. Planned work includes additional portable export formats, accessibility refinement, and performance profiling across a wider range of scanned and malformed PDFs.
 
-```text
-main.js
-manifest.json
-styles.css
-```
+Please report a reproducible document issue through the bug template. Do not upload a private PDF; use a minimal public or synthetic reproduction whenever possible.
 
-## Attribution and provenance
+## Clean-room note
 
-Lumen PDF Annotator is a substantially redesigned derivative of
-[Alex Annotator](https://github.com/alexandert142/Alex-annotator) by Alexander
-Tian, used under its MIT license. Lumen retains that copyright notice in
-`LICENSE` and adds a new floating interface, indexed/virtualized annotation
-paths, large-document search, backup bundles, themes, hotkeys, and extensive
-performance work and regression validation.
+Lumen is an independent rewrite from a standalone product specification. Zotero and Alex Annotator helped identify useful interaction concepts in the broader PDF-annotation space, but no source code, assets, styles, or Git history from either project are included. The compatibility importer only reads user-owned annotation data; the interface, current storage format, performance architecture, and implementation are Lumen's own.
 
-The production bundle embeds Mozilla PDF.js through `pdfjs-dist`. See
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for its Apache-2.0 notice.
+## License
 
-Community Directory publication is subject to Obsidian's fork policy and the
-original author's publicly verifiable approval.
+[MIT](LICENSE) © 2026 Ben Gutteridge. Bundled dependency notices are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

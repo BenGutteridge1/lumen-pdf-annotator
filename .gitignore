@@ -1,17 +1,5 @@
 node_modules/
 dist/
+test/
 *.log
 .DS_Store
-
-audit-renders/
-
-# Legacy design captures retained locally for reference; they do not represent
-# Lumen's current UI and should not be published in the community repository.
-docs/screenshots/
-obsidian-optimized-binding.png
-
-# Local validation sources are intentionally not part of the public plugin
-# distribution repository.
-test/
-QA.md
-PERFORMANCE.md
