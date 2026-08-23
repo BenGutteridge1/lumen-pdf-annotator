@@ -1,0 +1,30 @@
+name: Feature request
+description: Suggest an improvement to Lumen PDF Annotator.
+title: "[Feature]: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Reading or annotation problem
+      description: What workflow is difficult today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed improvement
+    validations:
+      required: true
+  - type: textarea
+    id: scale
+    attributes:
+      label: Performance considerations
+      description: How should this behave with large PDFs or annotation collections?
+  - type: checkboxes
+    id: terms
+    attributes:
+      label: Checks
+      options:
+        - label: I searched existing issues for the same request.
+          required: true

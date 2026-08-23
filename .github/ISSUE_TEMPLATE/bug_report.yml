@@ -1,0 +1,64 @@
+name: Bug report
+description: Report a reproducible problem in Lumen PDF Annotator.
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Please do not upload private or copyrighted PDFs. Use a small synthetic or public reproduction.
+  - type: input
+    id: lumen-version
+    attributes:
+      label: Lumen version
+      placeholder: 1.0.0
+    validations:
+      required: true
+  - type: input
+    id: obsidian-version
+    attributes:
+      label: Obsidian version
+      placeholder: 1.13.7
+    validations:
+      required: true
+  - type: input
+    id: operating-system
+    attributes:
+      label: Operating system
+      placeholder: macOS 15, Windows 11, or Linux distribution
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      description: Include approximate PDF page and annotation counts.
+      placeholder: |
+        1. Open a synthetic PDF with…
+        2. Select…
+        3. Click…
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behaviour
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Add a redacted screenshot or link to a safe public reproduction if helpful.
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy check
+      options:
+        - label: I have not attached private vault data or a non-redistributable PDF.
+          required: true
