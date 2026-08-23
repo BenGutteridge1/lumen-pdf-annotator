@@ -96,7 +96,7 @@ Default hotkeys:
 
 | Action | macOS | Windows/Linux |
 | --- | --- | --- |
-| Toggle PDF search | `Cmd+F` | `Ctrl+F` |
+| Toggle PDF search (while a Lumen PDF tab is active) | `Cmd+F` | `Ctrl+F` |
 | Toggle annotation inspector | `Cmd+Shift+A` | `Ctrl+Shift+A` |
 | Zoom in | `Cmd+Shift+=` | `Ctrl+Shift+=` |
 | Zoom out | `Cmd+-` | `Ctrl+-` |
