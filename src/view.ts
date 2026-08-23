@@ -727,25 +727,8 @@ export class LumenPdfView extends FileView {
     const palette = document.body.createDiv({ cls: "lumen-selection-palette" });
     this.syncDetachedTheme(palette);
     this.selectionPalette = palette;
-    let pendingStyle: MarkStyle = "highlight";
     let pendingColor: string = MARK_COLORS[0];
     const colorChips: HTMLButtonElement[] = [];
-    const styles = palette.createDiv({ cls: "lumen-style-row lumen-selection-styles" });
-    const styleButtons: HTMLButtonElement[] = [];
-    for (const [style, icon] of [["highlight", "highlighter"], ["underline", "underline"], ["dashed", "minus"], ["dotted", "ellipsis"], ["strike", "strikethrough"], ["box", "square"], ["comment", "message-square"]] as const) {
-      const button = iconButton(icon, `Choose ${markLabel(style)}`, () => {
-        pendingStyle = style;
-        for (const item of styleButtons) {
-          const active = item === button;
-          item.classList.toggle("is-active", active);
-          item.setAttribute("aria-pressed", String(active));
-        }
-      });
-      button.classList.toggle("is-active", style === pendingStyle);
-      button.setAttribute("aria-pressed", String(style === pendingStyle));
-      styleButtons.push(button);
-      styles.append(button);
-    }
     const colors = palette.createDiv({ cls: "lumen-color-row" });
     for (const color of MARK_COLORS) {
       const chip = colors.createEl("button", { cls: "lumen-color-chip", attr: { "aria-label": `Choose ${color}` } });
@@ -764,9 +747,13 @@ export class LumenPdfView extends FileView {
       });
       colorChips.push(chip);
     }
+    const styles = palette.createDiv({ cls: "lumen-style-row lumen-selection-styles" });
+    for (const [style, icon] of [["highlight", "highlighter"], ["underline", "underline"], ["dashed", "minus"], ["dotted", "ellipsis"], ["strike", "strikethrough"], ["box", "square"], ["comment", "message-square"]] as const) {
+      styles.append(iconButton(icon, `Apply ${markLabel(style)}`, () => {
+        this.commitSelection(style, pendingColor, style === "comment");
+      }));
+    }
     const actions = palette.createDiv({ cls: "lumen-palette-actions" });
-    actions.append(iconButton("check", "Apply chosen colour and mark type", () => this.commitSelection(pendingStyle, pendingColor, false)));
-    actions.append(iconButton("message-square", "Apply and add a note", () => this.commitSelection(pendingStyle, pendingColor, true)));
     actions.append(iconButton("copy", "Copy selected text", () => {
       void navigator.clipboard.writeText(pendingSelection.quote);
       this.closeSelectionPalette();
