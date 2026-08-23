@@ -18,7 +18,6 @@ interface ViewRegistryWithExtensions {
 
 export default class LumenPdfPlugin extends Plugin {
   settings: LumenSettings = DEFAULT_SETTINGS;
-  private mostRecentPdfPath: string | null = null;
   private settingsWrite: Promise<void> = Promise.resolve();
 
   async onload(): Promise<void> {
@@ -34,9 +33,6 @@ export default class LumenPdfPlugin extends Plugin {
       this.settings.legacyAnnotationFolder,
     ));
     if (this.settings.defaultViewer) this.installAsDefaultPdfViewer();
-    this.registerEvent(this.app.workspace.on("file-open", file => {
-      if (file?.extension.toLowerCase() === "pdf") this.mostRecentPdfPath = file.path;
-    }));
     this.registerDomEvent(window, "keydown", event => this.routeReaderHotkey(event), true);
     this.registerObsidianProtocolHandler(LUMEN_PROTOCOL_ACTION, params => void this.openAnnotationLink(params).catch(error => {
       console.error("Lumen could not open an annotation link", error);
@@ -112,7 +108,6 @@ export default class LumenPdfPlugin extends Plugin {
   }
 
   private async openFile(file: TFile, leaf = this.app.workspace.getLeaf(false) as WorkspaceLeaf): Promise<LumenPdfView | null> {
-    this.mostRecentPdfPath = file.path;
     await leaf.setViewState({ type: LUMEN_VIEW_TYPE, active: true, state: { file: file.path } });
     this.app.workspace.revealLeaf(leaf);
     return leaf.view instanceof LumenPdfView ? leaf.view : null;
@@ -160,24 +155,13 @@ export default class LumenPdfPlugin extends Plugin {
   private routeReaderHotkey(event: KeyboardEvent): void {
     const primary = Platform.isMacOS ? event.metaKey : event.ctrlKey;
     if (!primary || event.altKey) return;
+    // `getActiveViewOfType()` can resolve a matching view that is still open
+    // elsewhere in the workspace. The shortcut must be scoped to the actual
+    // active leaf so an unfocused (or closed) PDF cannot take over Cmd/Ctrl+F.
+    // Otherwise leave the event untouched for Obsidian's normal find command.
+    const view = this.app.workspace.activeLeaf?.view;
+    if (!(view instanceof LumenPdfView)) return;
     const key = event.key.toLowerCase();
-    let view = this.app.workspace.getActiveViewOfType(LumenPdfView);
-    if (key === "f" && !event.shiftKey && !view) {
-      const recentLeaf = this.app.workspace.getLeavesOfType(LUMEN_VIEW_TYPE).at(-1);
-      if (recentLeaf?.view instanceof LumenPdfView) {
-        this.app.workspace.revealLeaf(recentLeaf);
-        view = recentLeaf.view;
-      } else {
-        const file = this.mostRecentPdfPath ? this.app.vault.getAbstractFileByPath(this.mostRecentPdfPath) : this.app.workspace.getActiveFile();
-        if (file instanceof TFile && file.extension.toLowerCase() === "pdf") {
-          event.preventDefault();
-          event.stopImmediatePropagation();
-          void this.openFile(file).then(() => this.app.workspace.getActiveViewOfType(LumenPdfView)?.toggleSearch());
-        }
-        return;
-      }
-    }
-    if (!view) return;
     if (key === "f" && !event.shiftKey) {
       event.preventDefault(); event.stopImmediatePropagation(); view.toggleSearch();
     } else if (key === "a" && event.shiftKey) {
