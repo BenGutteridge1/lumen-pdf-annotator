@@ -31,7 +31,7 @@ The screenshots show the running plugin in Obsidian using an original demo docum
 
 Lumen was built around large documents and dense annotation sets rather than optimized after the fact.
 
-- Only pages near the viewport receive a canvas and selectable text layer; distant pages remain lightweight shells. Page mounts are capped at two concurrent jobs, and leaving the render window releases the canvas, text layer, PDF page proxy, and completed task references.
+- Only pages near the viewport receive a canvas and selectable text layer; distant pages remain lightweight shells. Active scrolling cancels stale work and pauses new page paints. Once motion settles, a direction-aware single-page queue produces a quick preview, then upgrades the visible page to full detail and selectable text while idle. Leaving the render window releases the canvas backing store, text layer, PDF page proxy, and task references.
 - Canvas rendering is capped at 12 million pixels to avoid runaway memory use at extreme zoom levels.
 - Annotation lookups use ID and page indexes, so drawing a page does not scan the entire collection.
 - Pages with unusually dense markup switch to one bounded canvas overlay with a spatial click index instead of creating thousands of DOM nodes.
@@ -44,7 +44,7 @@ Lumen was built around large documents and dense annotation sets rather than opt
 
 A private synthetic benchmark used during 1.0.5 development inserted and search-indexed 100,000 annotations across 1,000 pages in 209.77 ms, traversed every page bucket in 12.80 ms, and searched all annotations in 18.13 ms on the development machine. A separate extreme run indexed 250,000 annotations across 2,000 pages in 576.63 ms, applied 10,000 edits in 72.80 ms, fetched a 12-card inspector window from the middle of the collection in 6.99 ms, traversed all page buckets in 34.76 ms, filtered the full collection in 60.07 ms, and sorted it in 10.76 ms. Those figures describe the in-memory index. A 100,000-record storage run restored the compact snapshot in 550.01 ms while returning to the host between 1,000-record batches, then produced a 28.24 MB compact checkpoint in 252.40 ms.
 
-The production bundle was also exercised inside Obsidian 1.13.7 with a synthetic 3,000-page PDF. The first page painted in under a second; jumps to pages 1,500 and 3,000 returned to 0% idle CPU; twelve rapid distant-page jumps completed in 3.77 seconds; and the process settled between roughly 62 MB and 84 MB resident memory instead of growing with every visited page. A rare full-document search reached and highlighted its only match on page 3,000 while yielding control throughout. Results vary by machine and document, but the numbers make the intended scale concrete.
+The production bundle was also exercised inside Obsidian 1.13.7 with a synthetic 3,000-page PDF. Rapid forward scrolling and a separate forward/reverse run each recorded zero sampled frame gaps above 34 ms; the worst sampled gap was 33 ms. The first page painted in under a second; jumps to pages 1,500 and 3,000 returned to 0% idle CPU; twelve rapid distant-page jumps completed in 3.77 seconds; and the process settled between roughly 62 MB and 84 MB resident memory instead of growing with every visited page. A rare full-document search reached and highlighted its only match on page 3,000 while yielding control throughout. Results vary by machine and document, but the numbers make the intended scale concrete.
 
 ## Local, recoverable storage
 

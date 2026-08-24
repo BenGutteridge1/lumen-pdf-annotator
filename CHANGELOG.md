@@ -2,6 +2,16 @@
 
 All notable changes to Lumen PDF Annotator are documented here.
 
+## 1.0.6 — 2026-08-24
+
+- Paused new page rendering during active scrolling and cancelled stale canvas and text-layer work as soon as a page leaves the render window.
+- Replaced the FIFO page renderer with a direction-aware, visible-page-priority queue limited to one canvas job at a time.
+- Added a low-resolution preview after scrolling settles, followed by an idle high-detail canvas and selectable text layer without replacing a ready canvas prematurely.
+- Yielded PDF.js render continuations to animation frames so long page paints do not monopolize the interface thread.
+- Reduced dense-mark DOM pressure, paced dense canvas overlays during scrolling, and delegated annotation pointer events from one page-container listener.
+- Released canvas backing stores and PDF page resources during unmount, zoom, and teardown.
+- Verified rapid forward and reverse scrolling in Obsidian with a synthetic 3,000-page PDF: no sampled frame exceeded 34 ms, with a worst sampled gap of 33 ms.
+
 ## 1.0.5 — 2026-08-24
 
 - Removed the automatic vault-wide legacy-note scan from PDF open; legacy import is now an explicit command.

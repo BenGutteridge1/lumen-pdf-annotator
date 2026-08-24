@@ -84,8 +84,10 @@ or Git history from another annotator plugin.
 - Default inspector lookup requests only the visible newest/oldest window from
   the logical recency index.
 - Search work yields after six pages and can be cancelled.
-- At most two normal viewport page mounts run concurrently; off-screen pages
-  release canvas, text, PDF page, render task, and hit-index resources.
+- Active scrolling pauses new page paints and cancels stale canvas and text work;
+  a direction-aware queue resumes with a preview, then idle detail and text.
+- At most one normal viewport page mount runs at a time; off-screen pages release
+  canvas backing stores, text, PDF page, render task, and hit-index resources.
 - Multiple open PDFs have separate workers.
 - Target workload: 250,000 annotations, 10,000 updates, and PDFs with thousands
   of pages without long UI stalls or visit-proportional memory growth.
