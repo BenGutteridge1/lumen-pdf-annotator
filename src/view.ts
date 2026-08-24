@@ -1,4 +1,4 @@
-import { FileView, Menu, Notice, setIcon, TFile, WorkspaceLeaf } from "obsidian";
+import { FileView, Menu, Notice, Scope, setIcon, TFile, WorkspaceLeaf } from "obsidian";
 import { annotationMarkdownLink } from "./links";
 import { AnnotationIndex, MARK_COLORS, MarkStyle, newAnnotation, newPageNote, NormalizedRect, PdfAnnotation } from "./model";
 import { annotationTarget, comparableFileName, QuoteAnnotationRecord, quoteAnnotations } from "./legacy";
@@ -161,6 +161,30 @@ export class LumenPdfView extends FileView {
   ) {
     super(leaf);
     this.theme = initialTheme;
+    // A view scope is active only while this PDF pane has focus. Its bindings
+    // shadow inherited/global bindings, so Cmd/Ctrl+F cannot invoke another
+    // plugin's find command while it opens Lumen's PDF search.
+    this.scope = new Scope(this.app.scope);
+    this.scope.register(["Mod"], "f", () => {
+      this.toggleSearch();
+      return false;
+    });
+    this.scope.register(["Mod", "Shift"], "a", () => {
+      this.toggleInspector();
+      return false;
+    });
+    this.scope.register(["Mod", "Shift"], "=", () => {
+      this.zoomIn();
+      return false;
+    });
+    this.scope.register(["Mod"], "-", () => {
+      this.zoomOut();
+      return false;
+    });
+    this.scope.register(["Mod"], "0", () => {
+      this.resetZoom();
+      return false;
+    });
   }
 
   getViewType(): string { return LUMEN_VIEW_TYPE; }

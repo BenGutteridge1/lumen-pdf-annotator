@@ -1,4 +1,4 @@
-import { FuzzySuggestModal, normalizePath, Notice, ObsidianProtocolData, Platform, Plugin, PluginSettingTab, Setting, TFile, WorkspaceLeaf } from "obsidian";
+import { FuzzySuggestModal, normalizePath, Notice, ObsidianProtocolData, Plugin, PluginSettingTab, Setting, TFile, WorkspaceLeaf } from "obsidian";
 import { LUMEN_PROTOCOL_ACTION } from "./links";
 import { disposePdfRuntime } from "./pdf-runtime";
 import { BundleInfo, listBundles, restoreBundle, verifyBundle } from "./storage";
@@ -33,7 +33,6 @@ export default class LumenPdfPlugin extends Plugin {
       this.settings.legacyAnnotationFolder,
     ));
     if (this.settings.defaultViewer) this.installAsDefaultPdfViewer();
-    this.registerDomEvent(window, "keydown", event => this.routeReaderHotkey(event), true);
     this.registerObsidianProtocolHandler(LUMEN_PROTOCOL_ACTION, params => void this.openAnnotationLink(params).catch(error => {
       console.error("Lumen could not open an annotation link", error);
       new Notice("Lumen could not open this annotation link.");
@@ -150,29 +149,6 @@ export default class LumenPdfPlugin extends Plugin {
     const write = this.settingsWrite.catch(() => undefined).then(() => this.saveData(snapshot));
     this.settingsWrite = write;
     return write;
-  }
-
-  private routeReaderHotkey(event: KeyboardEvent): void {
-    const primary = Platform.isMacOS ? event.metaKey : event.ctrlKey;
-    if (!primary || event.altKey) return;
-    // `getActiveViewOfType()` can resolve a matching view that is still open
-    // elsewhere in the workspace. The shortcut must be scoped to the actual
-    // active leaf so an unfocused (or closed) PDF cannot take over Cmd/Ctrl+F.
-    // Otherwise leave the event untouched for Obsidian's normal find command.
-    const view = this.app.workspace.activeLeaf?.view;
-    if (!(view instanceof LumenPdfView)) return;
-    const key = event.key.toLowerCase();
-    if (key === "f" && !event.shiftKey) {
-      event.preventDefault(); event.stopImmediatePropagation(); view.toggleSearch();
-    } else if (key === "a" && event.shiftKey) {
-      event.preventDefault(); event.stopImmediatePropagation(); view.toggleInspector();
-    } else if (key === "=" || key === "+") {
-      event.preventDefault(); view.zoomIn();
-    } else if (key === "-") {
-      event.preventDefault(); view.zoomOut();
-    } else if (key === "0") {
-      event.preventDefault(); view.resetZoom();
-    }
   }
 
   private async verifyAllBackups(): Promise<void> {
