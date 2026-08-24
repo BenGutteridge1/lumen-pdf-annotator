@@ -8,9 +8,15 @@ interface LumenSettings {
   defaultViewer: boolean;
   pdfTheme: PdfTheme;
   legacyAnnotationFolder: string;
+  automaticPdfBackups: boolean;
 }
 
-const DEFAULT_SETTINGS: LumenSettings = { defaultViewer: true, pdfTheme: "light", legacyAnnotationFolder: "PDF annotations" };
+const DEFAULT_SETTINGS: LumenSettings = {
+  defaultViewer: true,
+  pdfTheme: "light",
+  legacyAnnotationFolder: "PDF annotations",
+  automaticPdfBackups: false,
+};
 
 interface ViewRegistryWithExtensions {
   typeByExtension: Record<string, string>;
@@ -31,6 +37,7 @@ export default class LumenPdfPlugin extends Plugin {
         new Notice("Lumen could not save the PDF theme. Your current document will keep using it until reload.");
       }),
       this.settings.legacyAnnotationFolder,
+      this.settings.automaticPdfBackups,
     ));
     if (this.settings.defaultViewer) this.installAsDefaultPdfViewer();
     this.registerObsidianProtocolHandler(LUMEN_PROTOCOL_ACTION, params => void this.openAnnotationLink(params).catch(error => {
@@ -237,5 +244,12 @@ class LumenSettingTab extends PluginSettingTab {
           this.plugin.settings.legacyAnnotationFolder = value.trim().replace(/^\/+|\/+$/g, "") || "PDF annotations";
           await this.plugin.saveSettings();
         }));
+    new Setting(this.containerEl)
+      .setName("Create automatic PDF recovery copies")
+      .setDesc("Copy each opened PDF into Lumen's recovery storage in the background. Keep this off for the smoothest large-PDF and cloud-vault performance.")
+      .addToggle(toggle => toggle.setValue(this.plugin.settings.automaticPdfBackups).onChange(async value => {
+        this.plugin.settings.automaticPdfBackups = value;
+        await this.plugin.saveSettings();
+      }));
   }
 }

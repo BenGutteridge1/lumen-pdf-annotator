@@ -18,19 +18,22 @@ const MAX_SEARCH_RECTS_PER_PAGE = 300;
 const MAX_DOM_MARK_RECTS = 400;
 const MARK_RECTS_PER_FRAME = 1_200;
 const MARK_HIT_GRID_SIZE = 32;
+const PAGE_BUILD_BATCH = 64;
+const MAX_CONCURRENT_PAGE_MOUNTS = 2;
 
 interface PageState {
   pageNumber: number;
   shell: HTMLElement;
-  stage: HTMLElement;
-  canvasHost: HTMLElement;
-  searchHost: HTMLElement;
-  textHost: HTMLElement;
-  markHost: HTMLElement;
+  stage: HTMLElement | null;
+  canvasHost: HTMLElement | null;
+  searchHost: HTMLElement | null;
+  textHost: HTMLElement | null;
+  markHost: HTMLElement | null;
   page?: any;
   renderTask?: any;
   textTask?: any;
   mounted: boolean;
+  wanted: boolean;
   unmountTimer?: number;
   renderGeneration: number;
   markGeneration: number;
@@ -125,6 +128,9 @@ export class LumenPdfView extends FileView {
   private observer: IntersectionObserver | null = null;
   private readonly pages = new Map<number, PageState>();
   private readonly mountedPages = new Set<PageState>();
+  private readonly pendingPageMounts: PageState[] = [];
+  private readonly queuedPageMounts = new Set<PageState>();
+  private activePageMounts = 0;
   private zoom = 1.25;
   private baselineWidth = 760;
   private baselineHeight = 984;
@@ -158,6 +164,7 @@ export class LumenPdfView extends FileView {
     initialTheme: PdfTheme = "light",
     private readonly onThemeChange?: (theme: PdfTheme) => void,
     private readonly legacyAnnotationFolder = "PDF annotations",
+    private readonly automaticPdfBackups = false,
   ) {
     super(leaf);
     this.theme = initialTheme;
@@ -207,8 +214,9 @@ export class LumenPdfView extends FileView {
     if (generation !== this.documentGeneration) return;
     const bytes = await this.app.vault.readBinary(file);
     if (generation !== this.documentGeneration) return;
-    const bundle = await openBundle(this.app.vault, file, bytes);
+    const bundle = await openBundle(this.app.vault, file, bytes, this.automaticPdfBackups);
     if (generation !== this.documentGeneration) return;
+    const indexPromise = bundle.repository.load();
     const loaded = await loadPdf(bytes);
     if (generation !== this.documentGeneration) {
       try { await loaded.document?.destroy?.(); } catch { /* a newer document owns the view */ }
@@ -216,16 +224,17 @@ export class LumenPdfView extends FileView {
       loaded.port.terminate();
       return;
     }
-    this.bundle = bundle;
-    this.index = bundle.index;
     this.pdfDocument = loaded.document;
     this.pdfWorker = loaded.worker;
     this.workerPort = loaded.port;
     this.buildShell(file);
     await this.buildPages(generation);
     if (generation !== this.documentGeneration) return;
-    await this.importLegacyAnnotations(false, generation);
+    const index = await indexPromise;
     if (generation !== this.documentGeneration) return;
+    this.bundle = bundle;
+    this.index = index;
+    for (const state of this.mountedPages) this.renderMarks(state.pageNumber);
     this.refreshInspector();
   }
 
@@ -273,7 +282,7 @@ export class LumenPdfView extends FileView {
     if (state && !state.mounted) await this.mountPage(state);
     window.setTimeout(() => {
       this.flashAnnotation(this.index.groupId(target));
-      const mark = state?.markHost.querySelector<HTMLElement>(`[data-annotation-id="${target.id}"]`);
+      const mark = state?.markHost?.querySelector<HTMLElement>(`[data-annotation-id="${target.id}"]`);
       if (mark) this.openEditor(target, mark);
       else if (state) this.openEditorAtRect(target, this.annotationClientRect(target, state));
     }, 360);
@@ -313,6 +322,21 @@ export class LumenPdfView extends FileView {
     this.buildToolbar(file);
     this.buildSearchPanel();
     this.buildInspector();
+    this.pagesEl.addEventListener("click", event => {
+      const state = this.pageStateFromEvent(event);
+      if (!state) return;
+      if (this.pageNotePlacement) {
+        event.preventDefault();
+        event.stopPropagation();
+        this.placePageNote(event, state);
+        return;
+      }
+      this.openDenseAnnotationAtPoint(event, state);
+    });
+    this.pagesEl.addEventListener("contextmenu", event => {
+      const state = this.pageStateFromEvent(event);
+      if (state) this.openDenseAnnotationMenuAtPoint(event, state);
+    });
     this.scrollEl.addEventListener("mouseup", event => {
       if (this.suppressNextSelectionCapture) {
         this.suppressNextSelectionCapture = false;
@@ -463,6 +487,8 @@ export class LumenPdfView extends FileView {
     const firstViewport = first.getViewport({ scale: 1 });
     this.baselineWidth = firstViewport.width;
     this.baselineHeight = firstViewport.height;
+    this.pagesEl.style.setProperty("--lumen-page-width", `${this.baselineWidth}px`);
+    this.pagesEl.style.setProperty("--lumen-page-height", `${this.baselineHeight}px`);
     const pageCount = this.pdfDocument.numPages;
     (this.toolbarEl as any)._pageTotal.textContent = String(pageCount);
     this.observer = new IntersectionObserver(entries => {
@@ -471,52 +497,37 @@ export class LumenPdfView extends FileView {
         const state = this.pages.get(Number((entry.target as HTMLElement).dataset.page));
         if (!state) continue;
         if (entry.isIntersecting) {
+          state.wanted = true;
           if (state.unmountTimer) window.clearTimeout(state.unmountTimer);
-          void this.mountPage(state).catch(error => {
-            state.mounted = false;
-            this.mountedPages.delete(state);
-            state.renderGeneration++;
-            state.canvasHost.empty();
-            state.searchHost.empty();
-            state.textHost.empty();
-            state.markHost.empty();
-            state.markHitGrid = undefined;
-            state.markWideHits = undefined;
-            console.warn(`Lumen could not render PDF page ${state.pageNumber}`, error);
-          });
+          this.schedulePageMount(state);
         } else if (state.mounted) {
+          state.wanted = false;
           state.unmountTimer = window.setTimeout(() => this.unmountIfFar(state), 1200);
+        } else {
+          state.wanted = false;
         }
       }
-    }, { root: this.scrollEl, rootMargin: "900px 0px 900px", threshold: 0.01 });
+    }, { root: this.scrollEl, rootMargin: "520px 0px 520px", threshold: 0.01 });
 
+    let fragment = document.createDocumentFragment();
+    const batch: HTMLElement[] = [];
     for (let pageNumber = 1; pageNumber <= pageCount; pageNumber++) {
       if (generation !== this.documentGeneration) return;
-      const shell = this.pagesEl.createDiv({ cls: "lumen-page" });
+      const shell = document.createElement("div");
+      shell.className = "lumen-page";
       shell.dataset.page = String(pageNumber);
-      const stage = shell.createDiv({ cls: "lumen-page-stage" });
-      const canvasHost = stage.createDiv({ cls: "lumen-canvas-layer" });
-      const searchHost = stage.createDiv({ cls: "lumen-search-layer" });
-      const textHost = stage.createDiv({ cls: "lumen-text-layer" });
-      const markHost = stage.createDiv({ cls: "lumen-mark-layer" });
       const state: PageState = {
-        pageNumber, shell, stage, canvasHost, searchHost, textHost, markHost,
-        mounted: false, renderGeneration: 0, markGeneration: 0,
+        pageNumber, shell, stage: null, canvasHost: null, searchHost: null, textHost: null, markHost: null,
+        mounted: false, wanted: false, renderGeneration: 0, markGeneration: 0,
       };
       this.pages.set(pageNumber, state);
-      stage.addEventListener("click", event => {
-        if (this.pageNotePlacement) {
-          event.preventDefault();
-          event.stopPropagation();
-          this.placePageNote(event, state);
-          return;
-        }
-        this.openDenseAnnotationAtPoint(event, state);
-      });
-      stage.addEventListener("contextmenu", event => this.openDenseAnnotationMenuAtPoint(event, state));
-      this.sizePage(state, this.baselineWidth, this.baselineHeight);
-      this.observer.observe(shell);
-      if (pageNumber % 250 === 0) {
+      fragment.append(shell);
+      batch.push(shell);
+      if (batch.length >= PAGE_BUILD_BATCH || pageNumber === pageCount) {
+        this.pagesEl.append(fragment);
+        for (const page of batch) this.observer.observe(page);
+        fragment = document.createDocumentFragment();
+        batch.length = 0;
         await new Promise<void>(resolve => window.setTimeout(resolve, 0));
         if (generation !== this.documentGeneration) return;
       }
@@ -524,24 +535,81 @@ export class LumenPdfView extends FileView {
   }
 
   private sizePage(state: PageState, width: number, height: number): void {
-    state.stage.style.setProperty("--lumen-page-width", `${width}px`);
-    state.stage.style.setProperty("--lumen-page-height", `${height}px`);
+    state.shell.style.setProperty("--lumen-page-width", `${width}px`);
+    state.shell.style.setProperty("--lumen-page-height", `${height}px`);
+  }
+
+  private pageStateFromEvent(event: Event): PageState | null {
+    const target = event.target instanceof Element ? event.target : null;
+    const shell = target?.closest<HTMLElement>(".lumen-page");
+    return shell ? this.pages.get(Number(shell.dataset.page)) ?? null : null;
+  }
+
+  private ensurePageLayers(state: PageState): void {
+    if (state.stage) return;
+    state.stage = state.shell.createDiv({ cls: "lumen-page-stage" });
+    state.canvasHost = state.stage.createDiv({ cls: "lumen-canvas-layer" });
+    state.searchHost = state.stage.createDiv({ cls: "lumen-search-layer" });
+    state.textHost = state.stage.createDiv({ cls: "lumen-text-layer" });
+    state.markHost = state.stage.createDiv({ cls: "lumen-mark-layer" });
+  }
+
+  private releasePageLayers(state: PageState): void {
+    state.shell.empty();
+    state.stage = null;
+    state.canvasHost = null;
+    state.searchHost = null;
+    state.textHost = null;
+    state.markHost = null;
+  }
+
+  private schedulePageMount(state: PageState): void {
+    if (state.mounted || this.queuedPageMounts.has(state)) return;
+    this.queuedPageMounts.add(state);
+    this.pendingPageMounts.push(state);
+    this.pumpPageMounts();
+  }
+
+  private pumpPageMounts(): void {
+    while (this.activePageMounts < MAX_CONCURRENT_PAGE_MOUNTS && this.pendingPageMounts.length) {
+      const state = this.pendingPageMounts.shift();
+      if (!state) return;
+      this.queuedPageMounts.delete(state);
+      if (!state.wanted || state.mounted || !this.pdfDocument) continue;
+      this.activePageMounts++;
+      void this.mountPage(state).catch(error => {
+        state.mounted = false;
+        this.mountedPages.delete(state);
+        state.renderGeneration++;
+        this.releasePageLayers(state);
+        state.markHitGrid = undefined;
+        state.markWideHits = undefined;
+        console.warn(`Lumen could not render PDF page ${state.pageNumber}`, error);
+      }).finally(() => {
+        this.activePageMounts--;
+        this.pumpPageMounts();
+      });
+    }
   }
 
   private async mountPage(state: PageState): Promise<void> {
     if (!this.pdfDocument || state.mounted) return;
     state.mounted = true;
     this.mountedPages.add(state);
+    this.ensurePageLayers(state);
+    const canvasHost = state.canvasHost;
+    const textHost = state.textHost;
+    if (!canvasHost || !textHost) return;
     const generation = ++state.renderGeneration;
     const page = state.page ?? await this.pdfDocument.getPage(state.pageNumber);
     if (!state.mounted || generation !== state.renderGeneration) return;
     state.page = page;
     const cssViewport = page.getViewport({ scale: this.zoom });
     this.sizePage(state, cssViewport.width / this.zoom, cssViewport.height / this.zoom);
-    state.canvasHost.empty();
-    state.textHost.empty();
+    canvasHost.empty();
+    textHost.empty();
     const canvas = document.createElement("canvas");
-    state.canvasHost.append(canvas);
+    canvasHost.append(canvas);
     const dpr = Math.max(1, window.devicePixelRatio || 1);
     const desiredPixels = cssViewport.width * cssViewport.height * dpr * dpr;
     const pixelFactor = desiredPixels > MAX_CANVAS_PIXELS ? Math.sqrt(MAX_CANVAS_PIXELS / desiredPixels) : 1;
@@ -551,18 +619,25 @@ export class LumenPdfView extends FileView {
     canvas.height = Math.floor(renderViewport.height);
     canvas.style.width = `${cssViewport.width}px`;
     canvas.style.height = `${cssViewport.height}px`;
-    state.renderTask = page.render({ canvasContext: canvas.getContext("2d", { alpha: false }), viewport: renderViewport });
-    try { await state.renderTask.promise; } catch { /* cancelled during zoom/unload */ }
+    const renderTask = page.render({ canvasContext: canvas.getContext("2d", { alpha: false }), viewport: renderViewport });
+    state.renderTask = renderTask;
+    try { await renderTask.promise; } catch { /* cancelled during zoom/unload */ }
+    finally {
+      if (state.renderTask === renderTask) state.renderTask = undefined;
+    }
     if (!state.mounted || generation !== state.renderGeneration) return;
     try {
       const textContent = await page.getTextContent();
       const textLayer = new (await import("pdfjs-dist/build/pdf.mjs") as any).TextLayer({
         textContentSource: textContent,
-        container: state.textHost,
+        container: textHost,
         viewport: cssViewport,
       });
       state.textTask = textLayer;
-      await textLayer.render();
+      try { await textLayer.render(); }
+      finally {
+        if (state.textTask === textLayer) state.textTask = undefined;
+      }
     } catch { /* malformed text layers should not block the page */ }
     if (!state.mounted || generation !== state.renderGeneration) return;
     this.renderSearchMarks(state.pageNumber);
@@ -570,18 +645,16 @@ export class LumenPdfView extends FileView {
   }
 
   private unmountIfFar(state: PageState): void {
-    const root = this.scrollEl.getBoundingClientRect();
-    const rect = state.shell.getBoundingClientRect();
-    if (rect.bottom > root.top - 1800 && rect.top < root.bottom + 1800) return;
+    if (state.wanted || !state.mounted) return;
     state.renderTask?.cancel?.();
     state.textTask?.cancel?.();
+    state.renderTask = undefined;
+    state.textTask = undefined;
+    state.page = undefined;
     state.renderGeneration++;
     state.markGeneration++;
     if (state.markFrame) cancelAnimationFrame(state.markFrame);
-    state.canvasHost.empty();
-    state.searchHost.empty();
-    state.textHost.empty();
-    state.markHost.empty();
+    this.releasePageLayers(state);
     state.markHitGrid = undefined;
     state.markWideHits = undefined;
     state.mounted = false;
@@ -595,6 +668,9 @@ export class LumenPdfView extends FileView {
     for (const state of Array.from(this.mountedPages)) {
       state.renderTask?.cancel?.();
       state.textTask?.cancel?.();
+      state.renderTask = undefined;
+      state.textTask = undefined;
+      state.page = undefined;
       state.renderGeneration++;
       state.markGeneration++;
       if (state.markFrame) cancelAnimationFrame(state.markFrame);
@@ -681,7 +757,7 @@ export class LumenPdfView extends FileView {
     const [firstPage, lastPage] = this.pageRangeForClientRects(rects);
     for (let pageNumber = firstPage; pageNumber <= lastPage; pageNumber++) {
       const state = this.pages.get(pageNumber);
-      if (!state) continue;
+      if (!state?.stage) continue;
       const pageRect = state.stage.getBoundingClientRect();
       const normalized: NormalizedRect[] = [];
       for (const rect of rects) {
@@ -893,20 +969,21 @@ export class LumenPdfView extends FileView {
     this.closeSelectionPalette();
     this.refreshInspector();
     if (openEditor && first) {
-      const mark = this.pages.get(first.page)?.markHost.querySelector<HTMLElement>(`[data-annotation-id="${first.id}"]`);
+      const mark = this.pages.get(first.page)?.markHost?.querySelector<HTMLElement>(`[data-annotation-id="${first.id}"]`);
       if (mark) this.openEditor(first, mark);
     }
   }
 
   private renderMarks(pageNumber: number): void {
     const state = this.pages.get(pageNumber);
-    if (!state || !state.mounted) return;
+    if (!state?.mounted || !state.markHost) return;
+    const markHost = state.markHost;
     state.markGeneration++;
     if (state.markFrame) cancelAnimationFrame(state.markFrame);
     state.markFrame = undefined;
     state.markHitGrid = undefined;
     state.markWideHits = undefined;
-    state.markHost.empty();
+    markHost.empty();
     const annotations = this.index.onPage(pageNumber);
     const rectCount = annotations.reduce((total, annotation) => total + annotation.rects.length, 0);
     if (rectCount > MAX_DOM_MARK_RECTS) {
@@ -915,7 +992,7 @@ export class LumenPdfView extends FileView {
     }
     for (const annotation of annotations) {
       for (const rect of annotation.rects) {
-        const mark = state.markHost.createDiv({ cls: `lumen-mark style-${annotation.style}` });
+        const mark = markHost.createDiv({ cls: `lumen-mark style-${annotation.style}` });
         if (annotation.kind === "page-note") {
           mark.addClass("is-page-note");
           mark.setAttribute("aria-label", `Page ${annotation.page} note`);
@@ -943,6 +1020,7 @@ export class LumenPdfView extends FileView {
   }
 
   private renderDenseMarks(state: PageState, annotations: PdfAnnotation[], generation: number): void {
+    if (!state.stage || !state.markHost) return;
     const width = Math.max(1, state.stage.clientWidth);
     const height = Math.max(1, state.stage.clientHeight);
     const canvas = state.markHost.createEl("canvas", { cls: "lumen-dense-mark-canvas" });
@@ -1089,7 +1167,7 @@ export class LumenPdfView extends FileView {
 
   private denseAnnotationAtPoint(event: MouseEvent, state: PageState): PdfAnnotation | null {
     const grid = state.markHitGrid;
-    if (!grid || !state.mounted) return null;
+    if (!grid || !state.mounted || !state.stage) return null;
     const selection = window.getSelection();
     if (selection && !selection.isCollapsed) return null;
     const bounds = state.stage.getBoundingClientRect();
@@ -1138,7 +1216,7 @@ export class LumenPdfView extends FileView {
   }
 
   private annotationClientRect(annotation: PdfAnnotation, state: PageState): DOMRect {
-    const stage = state.stage.getBoundingClientRect();
+    const stage = (state.stage ?? state.shell).getBoundingClientRect();
     const rect = annotation.rects[0] ?? { x: 0, y: 0, width: 0, height: 0 };
     return new DOMRect(
       stage.left + rect.x * stage.width,
@@ -1253,6 +1331,7 @@ export class LumenPdfView extends FileView {
     }
     for (const page of pages) this.renderMarks(page);
     this.closeEditor();
+    this.inspector.querySelector(".lumen-inspector-detail")?.remove();
     this.refreshInspector();
   }
 
@@ -1277,6 +1356,18 @@ export class LumenPdfView extends FileView {
     return this.inspectorCache;
   }
 
+  private usesDirectInspectorWindow(): boolean {
+    const query = this.inspectorQuery?.value.trim() ?? "";
+    return this.activeFilter === "all"
+      && this.activeColor === "all"
+      && this.inspectorSort !== "page"
+      && !query;
+  }
+
+  private inspectorItemCount(): number {
+    return this.usesDirectInspectorWindow() ? this.index.logicalSize : this.filteredAnnotations().length;
+  }
+
   private refreshInspector(skipLayoutRead = false): void {
     if (!this.inspectorList) return;
     this.annotationCount.textContent = String(this.index.logicalSize);
@@ -1286,7 +1377,7 @@ export class LumenPdfView extends FileView {
       return;
     }
     if (!skipLayoutRead) {
-      const virtualHeight = this.inspectorVirtualHeight(this.filteredAnnotations().length);
+      const virtualHeight = this.inspectorVirtualHeight(this.inspectorItemCount());
       this.inspectorList.scrollTop = Math.min(this.inspectorList.scrollTop, Math.max(0, virtualHeight - this.inspectorList.clientHeight));
     }
     this.renderInspectorWindow(skipLayoutRead ? 500 : undefined, skipLayoutRead ? 0 : undefined);
@@ -1297,26 +1388,31 @@ export class LumenPdfView extends FileView {
   }
 
   private renderInspectorWindow(viewportOverride?: number, scrollTopOverride?: number): void {
-    const items = this.filteredAnnotations();
+    const directWindow = this.usesDirectInspectorWindow();
+    const filteredItems = directWindow ? null : this.filteredAnnotations();
+    const itemCount = directWindow ? this.index.logicalSize : filteredItems?.length ?? 0;
     // Read current layout before replacing the window. Initial opening passes
     // explicit values, so it performs no synchronous layout reads at all.
     const scrollTop = scrollTopOverride ?? this.inspectorList.scrollTop;
     this.inspectorList.empty();
-    if (!items.length) {
+    if (!itemCount) {
       this.inspectorList.createDiv({ cls: "lumen-empty", text: "No matching annotations" });
       return;
     }
     const viewport = (viewportOverride ?? this.inspectorList.clientHeight) || 500;
-    const logicalHeight = items.length * CARD_HEIGHT;
-    const virtualHeight = this.inspectorVirtualHeight(items.length);
+    const logicalHeight = itemCount * CARD_HEIGHT;
+    const virtualHeight = this.inspectorVirtualHeight(itemCount);
     const visibleCount = Math.max(1, Math.ceil(viewport / CARD_HEIGHT));
-    const maxAnchor = Math.max(0, items.length - visibleCount);
+    const maxAnchor = Math.max(0, itemCount - visibleCount);
     const scrollRange = Math.max(1, virtualHeight - viewport);
     const anchor = logicalHeight <= virtualHeight
       ? Math.floor(scrollTop / CARD_HEIGHT)
       : Math.round((scrollTop / scrollRange) * maxAnchor);
     const start = Math.max(0, anchor - CARD_OVERSCAN);
-    const end = Math.min(items.length, anchor + visibleCount + CARD_OVERSCAN);
+    const end = Math.min(itemCount, anchor + visibleCount + CARD_OVERSCAN);
+    const windowItems = directWindow
+      ? this.index.logicalSlice(start, end, this.inspectorSort === "newest")
+      : filteredItems?.slice(start, end) ?? [];
     const spacer = this.inspectorList.createDiv({ cls: "lumen-virtual-spacer" });
     spacer.style.height = `${virtualHeight}px`;
     const window = spacer.createDiv({ cls: "lumen-virtual-window" });
@@ -1325,10 +1421,10 @@ export class LumenPdfView extends FileView {
       ? start * CARD_HEIGHT
       : clamp(scrollTop - CARD_OVERSCAN * CARD_HEIGHT, 0, Math.max(0, virtualHeight - windowHeight));
     window.style.transform = `translateY(${windowTop}px)`;
-    for (let i = start; i < end; i++) {
-      const item = items[i];
+    for (let offset = 0; offset < windowItems.length; offset++) {
+      const item = windowItems[offset];
       const card = window.createDiv({ cls: "lumen-annotation-card" });
-      card.style.top = `${(i - start) * CARD_HEIGHT + 4}px`;
+      card.style.top = `${offset * CARD_HEIGHT + 4}px`;
       card.style.setProperty("--mark-color", item.color);
       const meta = card.createDiv({ cls: "lumen-card-meta" });
       meta.createEl("strong", { text: this.annotationPageLabel(item, "p.") });
@@ -1414,7 +1510,13 @@ export class LumenPdfView extends FileView {
 
   private async getSearchablePageText(pageNumber: number): Promise<SearchPageData> {
     const cached = this.pageTextCache.get(pageNumber);
-    if (cached !== undefined) return cached;
+    if (cached !== undefined) {
+      // Refresh insertion order so repeated searches retain recently used
+      // pages rather than the first pages encountered in the document.
+      this.pageTextCache.delete(pageNumber);
+      this.pageTextCache.set(pageNumber, cached);
+      return cached;
+    }
     const page = await this.pdfDocument.getPage(pageNumber);
     const viewport = page.getViewport({ scale: 1 });
     const content = await page.getTextContent();
@@ -1449,13 +1551,28 @@ export class LumenPdfView extends FileView {
       });
     }
     const data = { text, spans };
-    if (this.pageTextCacheChars + text.length <= MAX_SEARCH_CACHE_CHARS
-      && this.pageTextCacheSpans + spans.length <= MAX_SEARCH_CACHE_SPANS) {
-      this.pageTextCache.set(pageNumber, data);
-      this.pageTextCacheChars += text.length;
-      this.pageTextCacheSpans += spans.length;
-    }
+    this.cacheSearchPage(pageNumber, data);
+    if (!this.pages.get(pageNumber)?.mounted) page.cleanup?.();
     return data;
+  }
+
+  private cacheSearchPage(pageNumber: number, data: SearchPageData): void {
+    if (data.text.length > MAX_SEARCH_CACHE_CHARS || data.spans.length > MAX_SEARCH_CACHE_SPANS) return;
+    while (this.pageTextCache.size
+      && (this.pageTextCacheChars + data.text.length > MAX_SEARCH_CACHE_CHARS
+        || this.pageTextCacheSpans + data.spans.length > MAX_SEARCH_CACHE_SPANS)) {
+      const oldestPage = this.pageTextCache.keys().next().value as number | undefined;
+      if (oldestPage === undefined) break;
+      const oldest = this.pageTextCache.get(oldestPage);
+      this.pageTextCache.delete(oldestPage);
+      if (oldest) {
+        this.pageTextCacheChars -= oldest.text.length;
+        this.pageTextCacheSpans -= oldest.spans.length;
+      }
+    }
+    this.pageTextCache.set(pageNumber, data);
+    this.pageTextCacheChars += data.text.length;
+    this.pageTextCacheSpans += data.spans.length;
   }
 
   private searchRectsForRange(spans: QuoteTextSpan[], start: number, end: number): NormalizedRect[] {
@@ -1510,8 +1627,9 @@ export class LumenPdfView extends FileView {
 
   private renderSearchMarks(pageNumber: number): void {
     const state = this.pages.get(pageNumber);
-    if (!state || !state.mounted) return;
-    state.searchHost.empty();
+    if (!state?.mounted || !state.searchHost) return;
+    const searchHost = state.searchHost;
+    searchHost.empty();
     const pageHits = this.searchHitsByPage.get(pageNumber) ?? [];
     const ordered = this.activeSearchHit?.page === pageNumber
       ? [this.activeSearchHit, ...pageHits.filter(hit => hit !== this.activeSearchHit)]
@@ -1520,7 +1638,7 @@ export class LumenPdfView extends FileView {
     for (const hit of ordered) {
       for (const rect of hit.rects) {
         if (rendered >= MAX_SEARCH_RECTS_PER_PAGE) return;
-        const mark = state.searchHost.createDiv({ cls: "lumen-search-match" });
+        const mark = searchHost.createDiv({ cls: "lumen-search-match" });
         mark.classList.toggle("is-current", hit === this.activeSearchHit);
         mark.style.left = `${rect.x * 100}%`;
         mark.style.top = `${rect.y * 100}%`;
@@ -1535,7 +1653,7 @@ export class LumenPdfView extends FileView {
     this.rootEl?.querySelectorAll(".is-search-flash").forEach(element => element.classList.remove("is-search-flash"));
     this.searchHitsByPage.clear();
     this.activeSearchHit = null;
-    for (const state of this.pages.values()) state.searchHost.empty();
+    for (const state of this.pages.values()) state.searchHost?.empty();
   }
 
   private closeSelectionPalette(): void {
@@ -1552,7 +1670,7 @@ export class LumenPdfView extends FileView {
   }
 
   private placePageNote(event: MouseEvent, state: PageState): void {
-    if (!this.bundle) return;
+    if (!this.bundle || !state.stage) return;
     const bounds = state.stage.getBoundingClientRect();
     const markerWidth = 0.034;
     const markerHeight = markerWidth * (bounds.width / Math.max(1, bounds.height));
@@ -1565,7 +1683,7 @@ export class LumenPdfView extends FileView {
     this.renderMarks(state.pageNumber);
     this.refreshInspector();
     this.togglePageNotePlacement();
-    const mark = state.markHost.querySelector<HTMLElement>(`[data-annotation-id="${annotation.id}"]`);
+    const mark = state.markHost?.querySelector<HTMLElement>(`[data-annotation-id="${annotation.id}"]`);
     if (mark) this.openEditor(annotation, mark);
   }
 
@@ -1828,12 +1946,23 @@ export class LumenPdfView extends FileView {
     if (invalidate) this.documentGeneration++;
     this.observer?.disconnect();
     this.observer = null;
+    this.pendingPageMounts.length = 0;
+    this.queuedPageMounts.clear();
     cancelAnimationFrame(this.currentPageRaf);
     cancelAnimationFrame(this.inspectorRaf);
     for (const state of this.pages.values()) {
+      state.wanted = false;
+      state.mounted = false;
       state.renderTask?.cancel?.();
       state.textTask?.cancel?.();
+      state.renderTask = undefined;
+      state.textTask = undefined;
+      state.page = undefined;
+      state.renderGeneration++;
+      state.markGeneration++;
+      if (state.markFrame) cancelAnimationFrame(state.markFrame);
       if (state.unmountTimer) window.clearTimeout(state.unmountTimer);
+      this.releasePageLayers(state);
     }
     this.pages.clear();
     this.mountedPages.clear();
@@ -1850,10 +1979,13 @@ export class LumenPdfView extends FileView {
     this.closeEditor();
     if (this.bundle) {
       try {
-        await this.bundle.repository.checkpoint(this.index);
+        // Journal writes are incremental and bounded. A full snapshot can be
+        // hundreds of megabytes for extreme annotation sets, so closing or
+        // switching a PDF must never synchronously rebuild it.
+        await this.bundle.repository.flushJournal();
       } catch (error) {
-        console.error("Lumen could not checkpoint annotations while closing the PDF", error);
-        new Notice("Lumen could not save an annotation checkpoint. Recent journal data was retained.", 8000);
+        console.error("Lumen could not flush annotations while closing the PDF", error);
+        new Notice("Lumen could not flush recent annotation changes.", 8000);
       }
     }
     try { await this.pdfDocument?.destroy?.(); } catch { /* already gone */ }

@@ -19,9 +19,9 @@ export async function loadPdf(bytes: ArrayBuffer): Promise<{ document: any; work
   const { apiWorker, port } = createPdfWorker();
   try {
     const task = (pdfjs as any).getDocument({
-      // openBundle() has already finished hashing/backing up these bytes. Let
-      // PDF.js transfer this buffer to its worker instead of doubling a large
-      // document in renderer memory first.
+      // Bundle discovery has finished reading these bytes. Let PDF.js transfer
+      // the buffer to its worker instead of doubling a large document in the
+      // renderer process first.
       data: new Uint8Array(bytes),
       worker: apiWorker,
       isEvalSupported: false,

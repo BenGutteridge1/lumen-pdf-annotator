@@ -33,6 +33,11 @@ export class AnnotationIndex {
   private readonly pages = new Map<number, Set<string>>();
   private readonly groups = new Map<string, Set<string>>();
   private readonly searchable = new Map<string, string>();
+  // Map has no reverse iterator. Keep an append-only recency log so the
+  // inspector can request only its visible newest/oldest window without
+  // materialising hundreds of thousands of annotations first.
+  private logicalOrder: string[] = [];
+  private readonly logicalPosition = new Map<string, number>();
   private revision = 0;
   private cachedRevision = -1;
   private cachedAll: PdfAnnotation[] = [];
@@ -81,7 +86,10 @@ export class AnnotationIndex {
     if (previousGroupId) {
       const previousGroup = this.groups.get(previousGroupId);
       previousGroup?.delete(annotation.id);
-      if (previousGroup?.size === 0) this.groups.delete(previousGroupId);
+      if (previousGroup?.size === 0) {
+        this.groups.delete(previousGroupId);
+        this.logicalPosition.delete(previousGroupId);
+      }
     }
     // Map/Set insertion order doubles as a mutation-time index. Moving an
     // existing id to the end makes newest/oldest inspector views linear
@@ -104,6 +112,7 @@ export class AnnotationIndex {
     // Mutation order is also the logical annotation recency index.
     this.groups.delete(groupId);
     this.groups.set(groupId, groupIds);
+    this.touchLogicalGroup(groupId);
     this.revision++;
   }
 
@@ -115,7 +124,10 @@ export class AnnotationIndex {
     const groupId = this.groupId(annotation);
     const groupIds = this.groups.get(groupId);
     groupIds?.delete(id);
-    if (groupIds?.size === 0) this.groups.delete(groupId);
+    if (groupIds?.size === 0) {
+      this.groups.delete(groupId);
+      this.logicalPosition.delete(groupId);
+    }
     const pageIds = this.pages.get(annotation.page);
     pageIds?.delete(id);
     if (pageIds?.size === 0) this.pages.delete(annotation.page);
@@ -144,24 +156,60 @@ export class AnnotationIndex {
 
   logicalAll(): PdfAnnotation[] {
     if (this.cachedLogicalRevision === this.revision) return this.cachedLogicalAll;
-    const result: PdfAnnotation[] = [];
-    for (const [groupId, ids] of this.groups) {
-      const anchor = this.items.get(groupId);
-      if (anchor) {
-        result.push(anchor);
-        continue;
-      }
-      for (const id of ids) {
-        const value = this.items.get(id);
-        if (value) {
-          result.push(value);
-          break;
-        }
-      }
-    }
-    this.cachedLogicalAll = result;
+    this.cachedLogicalAll = this.logicalSlice(0, this.logicalSize);
     this.cachedLogicalRevision = this.revision;
     return this.cachedLogicalAll;
+  }
+
+  logicalSlice(start: number, end: number, newestFirst = false): PdfAnnotation[] {
+    const first = Math.max(0, Math.trunc(start));
+    const last = Math.min(this.logicalSize, Math.max(first, Math.trunc(end)));
+    if (first >= last) return [];
+    const result: PdfAnnotation[] = [];
+    let logicalIndex = 0;
+    const step = newestFirst ? -1 : 1;
+    for (let position = newestFirst ? this.logicalOrder.length - 1 : 0;
+      position >= 0 && position < this.logicalOrder.length;
+      position += step) {
+      const groupId = this.logicalOrder[position];
+      if (this.logicalPosition.get(groupId) !== position) continue;
+      if (logicalIndex >= first) {
+        const annotation = this.logicalAnnotation(groupId);
+        if (annotation) result.push(annotation);
+      }
+      logicalIndex++;
+      if (logicalIndex >= last) break;
+    }
+    return result;
+  }
+
+  private logicalAnnotation(groupId: string): PdfAnnotation | undefined {
+    const anchor = this.items.get(groupId);
+    if (anchor) return anchor;
+    const ids = this.groups.get(groupId);
+    if (!ids) return undefined;
+    for (const id of ids) {
+      const value = this.items.get(id);
+      if (value) return value;
+    }
+    return undefined;
+  }
+
+  private touchLogicalGroup(groupId: string): void {
+    const position = this.logicalOrder.length;
+    this.logicalOrder.push(groupId);
+    this.logicalPosition.set(groupId, position);
+    this.compactLogicalOrderIfNeeded();
+  }
+
+  private compactLogicalOrderIfNeeded(): void {
+    const toleratedStaleEntries = Math.max(1_024, Math.floor(this.groups.size / 8));
+    if (this.logicalOrder.length <= this.groups.size + toleratedStaleEntries) return;
+    this.logicalOrder = Array.from(this.groups.keys());
+    this.logicalPosition.clear();
+    for (let position = 0; position < this.logicalOrder.length; position++) {
+      this.logicalPosition.set(this.logicalOrder[position], position);
+    }
   }
 
   matches(annotation: PdfAnnotation, normalizedQuery: string): boolean {

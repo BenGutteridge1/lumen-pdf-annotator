@@ -3,6 +3,7 @@ import { AnnotationIndex, AnnotationMutation, MARK_COLORS, MarkStyle, PdfAnnotat
 
 const ROOT = ".lumen-pdf/bundles/sha256";
 const LEGACY_ROOT = ".pdf-annotator/bundles/sha256";
+const FILE_INDEX_ROOT = ".lumen-pdf/file-index";
 
 export interface BundleManifest {
   version: number;
@@ -44,13 +45,51 @@ export interface LegacyAnnotationRecord {
 export interface DocumentBundle {
   hash: string;
   folder: string;
-  index: AnnotationIndex;
   repository: AnnotationRepository;
 }
 
 export async function sha256(bytes: ArrayBuffer): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", bytes);
   return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function stablePathKey(path: string): string {
+  let hash = 2166136261;
+  for (let index = 0; index < path.length; index++) {
+    hash ^= path.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `${(hash >>> 0).toString(36)}-${path.length.toString(36)}`;
+}
+
+async function documentHash(vault: Vault, file: TFile, bytes: ArrayBuffer): Promise<string> {
+  await ensureFolder(vault, FILE_INDEX_ROOT);
+  const cachePath = `${FILE_INDEX_ROOT}/${stablePathKey(file.path)}.json`;
+  if (await vault.adapter.exists(cachePath)) {
+    try {
+      const cached = JSON.parse(await vault.adapter.read(cachePath)) as {
+        path?: unknown;
+        mtime?: unknown;
+        size?: unknown;
+        hash?: unknown;
+      };
+      if (cached.path === file.path
+        && cached.mtime === file.stat.mtime
+        && cached.size === file.stat.size
+        && typeof cached.hash === "string"
+        && /^[a-f0-9]{64}$/.test(cached.hash)) {
+        return cached.hash;
+      }
+    } catch { /* recompute invalid cache entries */ }
+  }
+  const hash = await sha256(bytes);
+  await vault.adapter.write(cachePath, JSON.stringify({
+    path: file.path,
+    mtime: file.stat.mtime,
+    size: file.stat.size,
+    hash,
+  }));
+  return hash;
 }
 
 async function ensureFolder(vault: Vault, path: string): Promise<void> {
@@ -106,6 +145,25 @@ function yieldToHost(): Promise<void> {
   return new Promise(resolve => globalThis.setTimeout(resolve, 0));
 }
 
+function schedulePdfBackup(vault: Vault, sourcePath: string, backupPath: string): void {
+  // A full PDF copy is useful for recovery, but it must never sit on the
+  // document-open critical path. DataAdapter.copy performs the filesystem work
+  // without constructing another large ArrayBuffer in the renderer process.
+  globalThis.setTimeout(() => {
+    void (async () => {
+      if (await vault.adapter.exists(backupPath)) return;
+      const partialPath = `${backupPath}.partial`;
+      if (await vault.adapter.exists(partialPath)) await vault.adapter.remove(partialPath);
+      await vault.adapter.copy(sourcePath, partialPath);
+      if (await vault.adapter.exists(backupPath)) {
+        await vault.adapter.remove(partialPath);
+        return;
+      }
+      await vault.adapter.rename(partialPath, backupPath);
+    })().catch(error => console.error("Lumen could not create a background PDF backup", error));
+  }, 1_500);
+}
+
 async function readSnapshot(markdown: string): Promise<PdfAnnotation[]> {
   const match = markdown.match(/```json lumen-pdf-data\n([\s\S]*?)\n```/);
   if (!match) return [];
@@ -122,6 +180,32 @@ async function readSnapshot(markdown: string): Promise<PdfAnnotation[]> {
   } catch {
     return [];
   }
+}
+
+async function readJsonSnapshot(json: string): Promise<PdfAnnotation[] | null> {
+  try {
+    const value: unknown = JSON.parse(json);
+    if (!Array.isArray(value)) return null;
+    const annotations: PdfAnnotation[] = [];
+    for (let index = 0; index < value.length; index++) {
+      const annotation = normalizeAnnotation(value[index]);
+      if (annotation) annotations.push(annotation);
+      if (index > 0 && index % 1_000 === 0) await yieldToHost();
+    }
+    return annotations;
+  } catch {
+    return null;
+  }
+}
+
+async function compactSnapshot(annotations: PdfAnnotation[]): Promise<string> {
+  const chunks = ["["];
+  for (let index = 0; index < annotations.length; index++) {
+    chunks.push(`${JSON.stringify(annotations[index])}${index + 1 < annotations.length ? "," : ""}`);
+    if (index > 0 && index % 1_000 === 0) await yieldToHost();
+  }
+  chunks.push("]");
+  return chunks.join("");
 }
 
 const VALID_STYLES = new Set<MarkStyle>(["highlight", "underline", "dashed", "dotted", "strike", "box", "comment"]);
@@ -190,6 +274,8 @@ function normalizeMutation(value: unknown): AnnotationMutation | null {
 export class AnnotationRepository {
   private readonly snapshotPath: string;
   private readonly previousPath: string;
+  private readonly compactSnapshotPath: string;
+  private readonly compactPreviousPath: string;
   private readonly journalPath: string;
   private readonly queued = new Map<string, AnnotationMutation>();
   private flushTimer: number | null = null;
@@ -204,20 +290,49 @@ export class AnnotationRepository {
   ) {
     this.snapshotPath = `${folder}/annotations.md`;
     this.previousPath = `${folder}/annotations.previous.md`;
+    this.compactSnapshotPath = `${folder}/annotations.snapshot.json`;
+    this.compactPreviousPath = `${folder}/annotations.snapshot.previous.json`;
     this.journalPath = `${folder}/annotations.journal.jsonl`;
   }
 
   async load(): Promise<AnnotationIndex> {
     const index = new AnnotationIndex();
     let snapshot: PdfAnnotation[] = [];
-    if (await this.vault.adapter.exists(this.snapshotPath)) {
+    let preserveLegacyOrder = false;
+    let loadedSnapshot = false;
+    if (await this.vault.adapter.exists(this.compactSnapshotPath)) {
+      const primary = await readJsonSnapshot(await this.vault.adapter.read(this.compactSnapshotPath));
+      if (primary) {
+        snapshot = primary;
+        loadedSnapshot = true;
+      } else {
+        this.dirty = true;
+      }
+    }
+    if (!loadedSnapshot && await this.vault.adapter.exists(this.compactPreviousPath)) {
+      const previous = await readJsonSnapshot(await this.vault.adapter.read(this.compactPreviousPath));
+      if (previous) {
+        snapshot = previous;
+        loadedSnapshot = true;
+      }
+      this.dirty = true;
+    }
+    if (!loadedSnapshot && await this.vault.adapter.exists(this.snapshotPath)) {
       snapshot = await readSnapshot(await this.vault.adapter.read(this.snapshotPath));
-    } else if (await this.vault.adapter.exists(this.previousPath)) {
+      preserveLegacyOrder = true;
+      loadedSnapshot = true;
+      this.dirty = true;
+    } else if (!loadedSnapshot && await this.vault.adapter.exists(this.previousPath)) {
       snapshot = await readSnapshot(await this.vault.adapter.read(this.previousPath));
+      preserveLegacyOrder = true;
+      loadedSnapshot = true;
+      this.dirty = true;
     }
     // Older snapshots were page-ordered. Normalizing once at load preserves
     // the index's O(n) newest/oldest inspector paths from then on.
-    snapshot.sort((a, b) => a.updatedAt - b.updatedAt || a.createdAt - b.createdAt || a.id.localeCompare(b.id));
+    if (preserveLegacyOrder) {
+      snapshot.sort((a, b) => a.updatedAt - b.updatedAt || a.createdAt - b.createdAt || a.id.localeCompare(b.id));
+    }
     for (let item = 0; item < snapshot.length; item++) {
       index.put(snapshot[item]);
       if (item > 0 && item % 1_000 === 0) await yieldToHost();
@@ -290,10 +405,10 @@ export class AnnotationRepository {
     if (!this.dirty) return;
     const checkpointRevision = index.version;
     const annotations = index.all();
-    if (await this.vault.adapter.exists(this.snapshotPath)) {
-      await this.vault.adapter.write(this.previousPath, await this.vault.adapter.read(this.snapshotPath));
+    if (await this.vault.adapter.exists(this.compactSnapshotPath)) {
+      await this.vault.adapter.write(this.compactPreviousPath, await this.vault.adapter.read(this.compactSnapshotPath));
     }
-    await this.vault.adapter.write(this.snapshotPath, await snapshotMarkdown(annotations, this.pdfPath, this.hash));
+    await this.vault.adapter.write(this.compactSnapshotPath, await compactSnapshot(annotations));
     if (index.version === checkpointRevision && this.queued.size === 0 && !this.flushing) {
       await this.vault.adapter.write(this.journalPath, "");
       this.dirty = false;
@@ -310,21 +425,37 @@ export class AnnotationRepository {
   }
 }
 
-export async function openBundle(vault: Vault, file: TFile, bytes: ArrayBuffer): Promise<DocumentBundle> {
-  const hash = await sha256(bytes);
+export async function openBundle(
+  vault: Vault,
+  file: TFile,
+  bytes: ArrayBuffer,
+  automaticPdfBackup = false,
+): Promise<DocumentBundle> {
+  const hash = await documentHash(vault, file, bytes);
   const folder = normalizePath(`${ROOT}/${hash}`);
   await ensureFolder(vault, folder);
   const backupPath = `${folder}/document.pdf`;
-  if (!(await vault.adapter.exists(backupPath))) await vault.adapter.writeBinary(backupPath, bytes);
-  await vault.adapter.write(`${folder}/manifest.json`, JSON.stringify({
+  if (automaticPdfBackup && !(await vault.adapter.exists(backupPath))) schedulePdfBackup(vault, file.path, backupPath);
+  const manifestPath = `${folder}/manifest.json`;
+  const manifest: BundleManifest = {
     version: 1,
     sha256: hash,
     workingPath: file.path,
     originalName: file.name,
     updatedAt: new Date().toISOString(),
-  }, null, 2));
+  };
+  let shouldWriteManifest = true;
+  if (await vault.adapter.exists(manifestPath)) {
+    try {
+      const previous = coerceManifest(JSON.parse(await vault.adapter.read(manifestPath)), hash);
+      if (previous?.sha256 === hash && previous.workingPath === file.path && previous.originalName === file.name) {
+        shouldWriteManifest = false;
+      }
+    } catch { /* replace malformed manifests */ }
+  }
+  if (shouldWriteManifest) await vault.adapter.write(manifestPath, JSON.stringify(manifest, null, 2));
   const repository = new AnnotationRepository(vault, folder, hash, file.path);
-  return { hash, folder, index: await repository.load(), repository };
+  return { hash, folder, repository };
 }
 
 function coerceManifest(value: unknown, hash: string): BundleManifest | null {
