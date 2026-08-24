@@ -31,21 +31,22 @@ The screenshots show the running plugin in Obsidian using an original demo docum
 
 Lumen was built around large documents and dense annotation sets rather than optimized after the fact.
 
-- Only pages near the viewport receive a canvas and selectable text layer; distant pages remain lightweight shells.
+- Only pages near the viewport receive a canvas and selectable text layer; distant pages remain lightweight shells. Page mounts are capped at two concurrent jobs, and leaving the render window releases the canvas, text layer, PDF page proxy, and completed task references.
 - Canvas rendering is capped at 12 million pixels to avoid runaway memory use at extreme zoom levels.
 - Annotation lookups use ID and page indexes, so drawing a page does not scan the entire collection.
 - Pages with unusually dense markup switch to one bounded canvas overlay with a spatial click index instead of creating thousands of DOM nodes.
-- The inspector mounts only the visible card window plus overscan.
-- Full-document search yields to Obsidian every six pages, can be cancelled, and bounds retained results and mounted cards.
+- The inspector mounts only the visible card window plus overscan. Its default newest/oldest views request that window directly from a recency index instead of rebuilding the full logical collection after every edit.
+- Full-document search yields to Obsidian every six pages, can be cancelled, bounds retained results and mounted cards, and uses a bounded least-recently-used page-text cache.
 - Selection capture and current-page tracking use page-range/binary lookup rather than walking every page, while hidden search and inspector panels release their result DOM.
-- Snapshot restore, annotation journals, and checkpoint serialization yield in bounded batches so six-figure loads and saves do not monopolize the UI thread.
+- Snapshot restore, annotation journals, and compact checkpoint serialization yield in bounded batches so six-figure loads and saves do not monopolize the UI thread. Closing or switching a PDF flushes only recent journal changes rather than rebuilding the entire snapshot.
+- Stable PDF metadata caches the content hash so unchanged large files are not re-hashed on every open. Optional recovery copies run in the background and are disabled by default to avoid cloud-vault sync pressure.
 - Each open PDF receives its own bundled, version-matched PDF.js worker.
 
-A private synthetic benchmark used during development inserted and search-indexed 100,000 annotations across 1,000 pages in 90.15 ms, traversed every page bucket in 9.17 ms, and searched all annotations in 13.28 ms on the development machine. A separate extreme run indexed 250,000 annotations across 2,000 pages in 253.49 ms, applied 10,000 edits in 22.91 ms, traversed the page buckets in 23.11 ms, filtered the full collection in 40.27 ms, and sorted it in 8.54 ms. Those figures describe the in-memory index. After cooperative restore yielding was enabled, a separate 100,000-record storage run parsed and search-indexed the snapshot in 467.15 ms total while returning to the host between 1,000-record batches, then produced a 35.2 MB readable checkpoint in 555.98 ms.
+A private synthetic benchmark used during 1.0.5 development inserted and search-indexed 100,000 annotations across 1,000 pages in 209.77 ms, traversed every page bucket in 12.80 ms, and searched all annotations in 18.13 ms on the development machine. A separate extreme run indexed 250,000 annotations across 2,000 pages in 576.63 ms, applied 10,000 edits in 72.80 ms, fetched a 12-card inspector window from the middle of the collection in 6.99 ms, traversed all page buckets in 34.76 ms, filtered the full collection in 60.07 ms, and sorted it in 10.76 ms. Those figures describe the in-memory index. A 100,000-record storage run restored the compact snapshot in 550.01 ms while returning to the host between 1,000-record batches, then produced a 28.24 MB compact checkpoint in 252.40 ms.
 
-The production bundle was also exercised inside Obsidian 1.13.7 with a 455-page PDF and 100,000 temporary annotations. In that run the annotations were inserted in 106.5 ms, the inspector opened in 2.9 ms, only nine annotation cards were mounted, and its capped virtual scroller navigated correctly from the newest record through the midpoint to the end. The temporary records were never queued for persistence and were removed after the run. Results vary by machine and document, but the numbers make the intended scale concrete.
+The production bundle was also exercised inside Obsidian 1.13.7 with a synthetic 3,000-page PDF. The first page painted in under a second; jumps to pages 1,500 and 3,000 returned to 0% idle CPU; twelve rapid distant-page jumps completed in 3.77 seconds; and the process settled between roughly 62 MB and 84 MB resident memory instead of growing with every visited page. A rare full-document search reached and highlighted its only match on page 3,000 while yielding control throughout. Results vary by machine and document, but the numbers make the intended scale concrete.
 
-## Local, readable storage
+## Local, recoverable storage
 
 The source PDF is never edited. Lumen hashes its bytes with SHA-256 and stores a recoverable bundle in your vault:
 
@@ -54,14 +55,16 @@ The source PDF is never edited. Lumen hashes its bytes with SHA-256 and stores a
   bundles/
     sha256/
       <document-hash>/
-        document.pdf
         manifest.json
-        annotations.md
-        annotations.previous.md
+        annotations.snapshot.json
+        annotations.snapshot.previous.json
         annotations.journal.jsonl
+        document.pdf  # only when automatic recovery copies are enabled
+  file-index/
+    <path-key>.json
 ```
 
-`annotations.md` is a human-readable snapshot. The append-only JSONL journal protects recent changes between checkpoints, while `annotations.previous.md` preserves the last known-good snapshot. Because identity comes from PDF content, annotations remain associated when the original file is renamed or moved.
+The append-only JSONL journal protects recent changes between checkpoints, while the previous compact snapshot provides a recovery fallback. The export command creates a readable Markdown representation whenever you want one. Existing Markdown snapshots remain supported as migration and corruption fallbacks. Because identity comes from PDF content, annotations remain associated when the original file is renamed or moved.
 
 Everything stays in the vault: no account, telemetry, remote processing, CDN scripts, or dynamic code loading.
 
@@ -110,11 +113,11 @@ Previous page, next page, page-note placement, annotation checkpoint, export, le
 - **Save an annotation checkpoint** immediately compacts the journal into a snapshot.
 - **Verify all PDF backup checksums** checks every local backup against its SHA-256 identity.
 - **Restore a backed-up PDF** verifies the checksum before creating a non-destructive copy under `.lumen-pdf/recovered/`.
-- **Import legacy annotations for this PDF** imports compatible user-owned annotation data when present. Automatic migration is attempted once per document and uses stable IDs to prevent duplicates.
+- **Import legacy annotations for this PDF** explicitly imports compatible user-owned annotation data when present and uses stable IDs to prevent duplicates. Lumen does not scan every Markdown note when a PDF opens.
 
 ## Settings
 
-**Make Lumen the default PDF viewer** is enabled initially. Disable it if you want to keep Obsidian's built-in PDF view and open selected PDFs through Lumen's command instead. Restart Obsidian after changing this setting. **PDF theme** sets the persistent light, sepia, or dark reading theme.
+**Make Lumen the default PDF viewer** is enabled initially. Disable it if you want to keep Obsidian's built-in PDF view and open selected PDFs through Lumen's command instead. Restart Obsidian after changing this setting. **PDF theme** sets the persistent light, sepia, or dark reading theme. **Create automatic PDF recovery copies** is disabled by default; enable it only if you want a background bundle copy in addition to your source PDF.
 
 ## Contributing
 

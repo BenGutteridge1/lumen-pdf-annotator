@@ -62,24 +62,33 @@ or Git history from another annotator plugin.
 
 - SHA-256 of the PDF bytes is the document identity.
 - Store under `.lumen-pdf/bundles/sha256/<hash>/`:
-  `document.pdf`, `annotations.md`, `annotations.previous.md`,
-  `annotations.journal.jsonl`, and `manifest.json`.
+  `annotations.snapshot.json`, `annotations.snapshot.previous.json`,
+  `annotations.journal.jsonl`, and `manifest.json`. Store `document.pdf` only
+  when the user enables automatic recovery copies.
+- Cache the hash against stable path, size, and modification metadata under
+  `.lumen-pdf/file-index/` so unchanged large PDFs are not re-hashed on open.
 - Keep ID and page indexes in memory.
-- Append coalesced edits to the journal and checkpoint readable Markdown on
-  close/export/explicit flush.
-- Preserve a last-known-good Markdown snapshot.
+- Append coalesced edits to the journal, flush only recent journal changes on
+  close, and build compact snapshots on explicit checkpoint/export.
+- Preserve a last-known-good compact snapshot and accept older Markdown
+  snapshots as a recovery fallback.
 - Export readable annotations, verify every backup checksum, and restore only a
   verified backup to a new recovery path.
-- Import compatible user-owned legacy annotations once with stable IDs.
+- Import compatible user-owned legacy annotations only on explicit command,
+  with stable IDs and no vault-wide scan during PDF open.
 
 ## Performance acceptance
 
 - Hot-path lookup and update are indexed rather than full-array scans.
 - Inspector DOM size follows the viewport, not annotation count.
+- Default inspector lookup requests only the visible newest/oldest window from
+  the logical recency index.
 - Search work yields after six pages and can be cancelled.
+- At most two normal viewport page mounts run concurrently; off-screen pages
+  release canvas, text, PDF page, render task, and hit-index resources.
 - Multiple open PDFs have separate workers.
-- Target workload: 100,000 annotations, 250,000 ID lookups, 10,000 updates,
-  and PDFs with hundreds of pages without long UI stalls.
+- Target workload: 250,000 annotations, 10,000 updates, and PDFs with thousands
+  of pages without long UI stalls or visit-proportional memory growth.
 
 ## Visual tokens
 

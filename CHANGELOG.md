@@ -2,6 +2,21 @@
 
 All notable changes to Lumen PDF Annotator are documented here.
 
+## 1.0.5 — 2026-08-24
+
+- Removed the automatic vault-wide legacy-note scan from PDF open; legacy import is now an explicit command.
+- Replaced eager per-page canvases, text layers, annotation layers, and listeners with batched lightweight page shells and delegated events.
+- Limited normal viewport rendering to two concurrent page mounts and fixed off-screen teardown so canvases, PDF page proxies, text layers, render tasks, and hit indexes are actually released.
+- Added a direct windowed recency index for the default annotation inspector, keeping visible-card lookup within a frame at 250,000 annotations.
+- Added bounded least-recently-used PDF search text caching and cleanup of non-visible page resources.
+- Added stable file metadata caching so unchanged PDFs are not re-hashed on every open.
+- Made full PDF recovery copies optional, disabled them by default, and moved enabled copies off the document-open critical path.
+- Replaced automatic close-time Markdown snapshot rebuilds with bounded journal flushes and faster compact JSON checkpoints.
+- Added fallback from corrupt compact snapshots through the previous snapshot and legacy Markdown recovery data.
+- Removed per-page zoom layout animations that scaled poorly with documents containing thousands of pages.
+- Fixed the expanded inspector detail remaining open after its annotation was deleted.
+- Verified the production bundle with a synthetic 3,000-page PDF, rare-match full-document search, rapid distant-page navigation, and 100,000/250,000-annotation workloads.
+
 ## 1.0.0 — 2026-08-23
 
 - Initial public release.
