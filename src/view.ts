@@ -15,11 +15,18 @@ const MAX_MARK_CANVAS_PIXELS = 4_000_000;
 const MAX_SEARCH_CACHE_CHARS = 24_000_000;
 const MAX_SEARCH_CACHE_SPANS = 150_000;
 const MAX_SEARCH_RECTS_PER_PAGE = 300;
-const MAX_DOM_MARK_RECTS = 400;
+const MAX_DOM_MARK_RECTS = 96;
 const MARK_RECTS_PER_FRAME = 1_200;
+const MARK_RECTS_PER_SCROLL_FRAME = 240;
 const MARK_HIT_GRID_SIZE = 32;
 const PAGE_BUILD_BATCH = 64;
-const MAX_CONCURRENT_PAGE_MOUNTS = 2;
+const MAX_CONCURRENT_PAGE_MOUNTS = 1;
+const PAGE_UNMOUNT_DELAY_MS = 1_800;
+const SCROLL_IDLE_DELAY_MS = 140;
+const PAGE_PREVIEW_DELAY_MS = 90;
+const TEXT_LAYER_IDLE_DELAY_MS = 80;
+const PAGE_DETAIL_DELAY_MS = 480;
+const SCROLL_PREVIEW_DPR = .65;
 
 interface PageState {
   pageNumber: number;
@@ -33,9 +40,18 @@ interface PageState {
   renderTask?: any;
   textTask?: any;
   mounted: boolean;
+  rendering: boolean;
+  canvasReady: boolean;
+  canvasDetailReady: boolean;
+  textReady: boolean;
+  textRendering: boolean;
   wanted: boolean;
+  visibleRatio: number;
+  renderedPixelRatio: number;
   unmountTimer?: number;
+  textTimer?: number;
   renderGeneration: number;
+  textGeneration: number;
   markGeneration: number;
   markFrame?: number;
   markHitGrid?: Map<number, PdfAnnotation[]>;
@@ -147,6 +163,14 @@ export class LumenPdfView extends FileView {
   private searchGeneration = 0;
   private inspectorRaf = 0;
   private currentPageRaf = 0;
+  private scrollIdleTimer = 0;
+  private pagePreviewTimer = 0;
+  private pagePreviewReadyAt = 0;
+  private pageDetailTimer = 0;
+  private pageDetailReadyAt = 0;
+  private lastScrollTop = 0;
+  private scrollDirection: -1 | 1 = 1;
+  private isScrolling = false;
   private pageNotePlacement = false;
   private pageNoteButton: HTMLButtonElement | null = null;
   private readonly pageTextCache = new Map<number, SearchPageData>();
@@ -279,7 +303,7 @@ export class LumenPdfView extends FileView {
     const target = this.index.get(idOrGroupId) ?? members.slice().sort((a, b) => a.page - b.page || a.createdAt - b.createdAt)[0];
     this.goToPage(target.page);
     const state = this.pages.get(target.page);
-    if (state && !state.mounted) await this.mountPage(state);
+    if (state && !state.canvasReady) await this.mountPage(state, true);
     window.setTimeout(() => {
       this.flashAnnotation(this.index.groupId(target));
       const mark = state?.markHost?.querySelector<HTMLElement>(`[data-annotation-id="${target.id}"]`);
@@ -325,6 +349,14 @@ export class LumenPdfView extends FileView {
     this.pagesEl.addEventListener("click", event => {
       const state = this.pageStateFromEvent(event);
       if (!state) return;
+      const mark = event.target instanceof Element ? event.target.closest<HTMLElement>(".lumen-mark") : null;
+      const annotation = mark?.dataset.annotationId ? this.index.get(mark.dataset.annotationId) : null;
+      if (mark && annotation) {
+        event.preventDefault();
+        event.stopPropagation();
+        this.openEditor(annotation, mark);
+        return;
+      }
       if (this.pageNotePlacement) {
         event.preventDefault();
         event.stopPropagation();
@@ -335,7 +367,17 @@ export class LumenPdfView extends FileView {
     });
     this.pagesEl.addEventListener("contextmenu", event => {
       const state = this.pageStateFromEvent(event);
-      if (state) this.openDenseAnnotationMenuAtPoint(event, state);
+      if (!state) return;
+      const mark = event.target instanceof Element ? event.target.closest<HTMLElement>(".lumen-mark") : null;
+      const annotation = mark?.dataset.annotationId ? this.index.get(mark.dataset.annotationId) : null;
+      if (annotation) {
+        event.preventDefault();
+        event.stopPropagation();
+        this.showAnnotationMenu(event, annotation);
+      } else this.openDenseAnnotationMenuAtPoint(event, state);
+    });
+    this.pagesEl.addEventListener("pointerdown", event => {
+      if (event.target instanceof Element && event.target.closest(".lumen-mark")) event.stopPropagation();
     });
     this.scrollEl.addEventListener("mouseup", event => {
       if (this.suppressNextSelectionCapture) {
@@ -345,8 +387,12 @@ export class LumenPdfView extends FileView {
       this.captureSelection(event);
     });
     this.scrollEl.addEventListener("scroll", () => {
+      this.handleScrollActivity();
       cancelAnimationFrame(this.currentPageRaf);
-      this.currentPageRaf = requestAnimationFrame(() => this.updateCurrentPage());
+      this.currentPageRaf = requestAnimationFrame(() => {
+        this.updateCurrentPage();
+        this.pumpPageMounts();
+      });
     }, { passive: true });
     this.rootEl.addEventListener("pointerdown", event => {
       const target = event.target as Node;
@@ -498,16 +544,21 @@ export class LumenPdfView extends FileView {
         if (!state) continue;
         if (entry.isIntersecting) {
           state.wanted = true;
+          state.visibleRatio = entry.intersectionRatio;
           if (state.unmountTimer) window.clearTimeout(state.unmountTimer);
           this.schedulePageMount(state);
-        } else if (state.mounted) {
-          state.wanted = false;
-          state.unmountTimer = window.setTimeout(() => this.unmountIfFar(state), 1200);
         } else {
           state.wanted = false;
+          state.visibleRatio = 0;
+          this.cancelPendingTextLayer(state);
+          if (state.rendering) this.cancelPageRender(state);
+          if (state.mounted) {
+            state.unmountTimer = window.setTimeout(() => this.unmountIfFar(state), PAGE_UNMOUNT_DELAY_MS);
+          }
         }
       }
-    }, { root: this.scrollEl, rootMargin: "520px 0px 520px", threshold: 0.01 });
+      this.pumpPageMounts();
+    }, { root: this.scrollEl, rootMargin: "360px 0px 360px", threshold: [0.01, 0.5] });
 
     let fragment = document.createDocumentFragment();
     const batch: HTMLElement[] = [];
@@ -518,7 +569,9 @@ export class LumenPdfView extends FileView {
       shell.dataset.page = String(pageNumber);
       const state: PageState = {
         pageNumber, shell, stage: null, canvasHost: null, searchHost: null, textHost: null, markHost: null,
-        mounted: false, wanted: false, renderGeneration: 0, markGeneration: 0,
+        mounted: false, rendering: false, canvasReady: false, canvasDetailReady: false,
+        textReady: false, textRendering: false, wanted: false, visibleRatio: 0,
+        renderedPixelRatio: 0, renderGeneration: 0, textGeneration: 0, markGeneration: 0,
       };
       this.pages.set(pageNumber, state);
       fragment.append(shell);
@@ -555,6 +608,10 @@ export class LumenPdfView extends FileView {
   }
 
   private releasePageLayers(state: PageState): void {
+    state.shell.querySelectorAll("canvas").forEach(canvas => {
+      canvas.width = 0;
+      canvas.height = 0;
+    });
     state.shell.empty();
     state.stage = null;
     state.canvasHost = null;
@@ -564,27 +621,49 @@ export class LumenPdfView extends FileView {
   }
 
   private schedulePageMount(state: PageState): void {
-    if (state.mounted || this.queuedPageMounts.has(state)) return;
+    if (state.rendering || this.queuedPageMounts.has(state) || !this.pageNeedsCanvasWork(state)) {
+      if (!this.isScrolling && state.canvasReady) this.scheduleTextLayer(state);
+      return;
+    }
     this.queuedPageMounts.add(state);
     this.pendingPageMounts.push(state);
     this.pumpPageMounts();
   }
 
+  private pageNeedsCanvasWork(state: PageState): boolean {
+    if (this.isScrolling || performance.now() < this.pagePreviewReadyAt) return false;
+    return !state.canvasReady
+      || (!this.isScrolling && performance.now() >= this.pageDetailReadyAt && !state.canvasDetailReady);
+  }
+
   private pumpPageMounts(): void {
     while (this.activePageMounts < MAX_CONCURRENT_PAGE_MOUNTS && this.pendingPageMounts.length) {
-      const state = this.pendingPageMounts.shift();
-      if (!state) return;
+      let bestIndex = -1;
+      let bestPriority = Number.POSITIVE_INFINITY;
+      for (let index = 0; index < this.pendingPageMounts.length; index++) {
+        const candidate = this.pendingPageMounts[index];
+        if (!candidate.wanted || candidate.rendering || !this.pageNeedsCanvasWork(candidate)) continue;
+        const delta = candidate.pageNumber - this.currentPage;
+        const behind = (this.scrollDirection > 0 && delta < 0) || (this.scrollDirection < 0 && delta > 0);
+        const priority = Math.abs(delta) * 10 + (behind ? 4 : 0) - candidate.visibleRatio * 20;
+        if (priority < bestPriority) {
+          bestPriority = priority;
+          bestIndex = index;
+        }
+      }
+      if (bestIndex < 0) {
+        for (const stale of this.pendingPageMounts) this.queuedPageMounts.delete(stale);
+        this.pendingPageMounts.length = 0;
+        return;
+      }
+      const [state] = this.pendingPageMounts.splice(bestIndex, 1);
       this.queuedPageMounts.delete(state);
-      if (!state.wanted || state.mounted || !this.pdfDocument) continue;
+      if (!state.wanted || state.rendering || !this.pdfDocument || !this.pageNeedsCanvasWork(state)) continue;
       this.activePageMounts++;
       void this.mountPage(state).catch(error => {
-        state.mounted = false;
-        this.mountedPages.delete(state);
-        state.renderGeneration++;
-        this.releasePageLayers(state);
-        state.markHitGrid = undefined;
-        state.markWideHits = undefined;
-        console.warn(`Lumen could not render PDF page ${state.pageNumber}`, error);
+        if (error?.name !== "RenderingCancelledException") {
+          console.warn(`Lumen could not render PDF page ${state.pageNumber}`, error);
+        }
       }).finally(() => {
         this.activePageMounts--;
         this.pumpPageMounts();
@@ -592,72 +671,176 @@ export class LumenPdfView extends FileView {
     }
   }
 
-  private async mountPage(state: PageState): Promise<void> {
-    if (!this.pdfDocument || state.mounted) return;
+  private async mountPage(state: PageState, force = false): Promise<void> {
+    if (!this.pdfDocument || state.rendering || (!force && !state.wanted)) return;
+    if (!force && !this.pageNeedsCanvasWork(state)) {
+      if (!this.isScrolling) this.scheduleTextLayer(state);
+      return;
+    }
+    state.rendering = true;
     state.mounted = true;
     this.mountedPages.add(state);
     this.ensurePageLayers(state);
     const canvasHost = state.canvasHost;
-    const textHost = state.textHost;
-    if (!canvasHost || !textHost) return;
-    const generation = ++state.renderGeneration;
-    const page = state.page ?? await this.pdfDocument.getPage(state.pageNumber);
-    if (!state.mounted || generation !== state.renderGeneration) return;
-    state.page = page;
-    const cssViewport = page.getViewport({ scale: this.zoom });
-    this.sizePage(state, cssViewport.width / this.zoom, cssViewport.height / this.zoom);
-    canvasHost.empty();
-    textHost.empty();
-    const canvas = document.createElement("canvas");
-    canvasHost.append(canvas);
-    const dpr = Math.max(1, window.devicePixelRatio || 1);
-    const desiredPixels = cssViewport.width * cssViewport.height * dpr * dpr;
-    const pixelFactor = desiredPixels > MAX_CANVAS_PIXELS ? Math.sqrt(MAX_CANVAS_PIXELS / desiredPixels) : 1;
-    const renderScale = this.zoom * dpr * pixelFactor;
-    const renderViewport = page.getViewport({ scale: renderScale });
-    canvas.width = Math.floor(renderViewport.width);
-    canvas.height = Math.floor(renderViewport.height);
-    canvas.style.width = `${cssViewport.width}px`;
-    canvas.style.height = `${cssViewport.height}px`;
-    const renderTask = page.render({ canvasContext: canvas.getContext("2d", { alpha: false }), viewport: renderViewport });
-    state.renderTask = renderTask;
-    try { await renderTask.promise; } catch { /* cancelled during zoom/unload */ }
-    finally {
-      if (state.renderTask === renderTask) state.renderTask = undefined;
+    if (!canvasHost) {
+      state.rendering = false;
+      return;
     }
-    if (!state.mounted || generation !== state.renderGeneration) return;
+    const generation = ++state.renderGeneration;
     try {
+      const page = state.page ?? await this.pdfDocument.getPage(state.pageNumber);
+      if (!state.mounted || generation !== state.renderGeneration || (!force && !state.wanted)) return;
+      state.page = page;
+      if (!force && !this.pageNeedsCanvasWork(state)) return;
+      const cssViewport = page.getViewport({ scale: this.zoom });
+      this.sizePage(state, cssViewport.width / this.zoom, cssViewport.height / this.zoom);
+      const fullDetail = force || (!this.isScrolling && performance.now() >= this.pageDetailReadyAt);
+      const deviceDpr = Math.max(1, window.devicePixelRatio || 1);
+      const requestedDpr = fullDetail ? deviceDpr : Math.min(deviceDpr, SCROLL_PREVIEW_DPR);
+      const desiredPixels = cssViewport.width * cssViewport.height * requestedDpr * requestedDpr;
+      const pixelFactor = desiredPixels > MAX_CANVAS_PIXELS ? Math.sqrt(MAX_CANVAS_PIXELS / desiredPixels) : 1;
+      const targetPixelRatio = requestedDpr * pixelFactor;
+      if (state.canvasReady && state.renderedPixelRatio >= targetPixelRatio * .98) {
+        state.canvasDetailReady ||= fullDetail;
+        return;
+      }
+      const renderViewport = page.getViewport({ scale: this.zoom * targetPixelRatio });
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.max(1, Math.floor(renderViewport.width));
+      canvas.height = Math.max(1, Math.floor(renderViewport.height));
+      canvas.style.width = `${cssViewport.width}px`;
+      canvas.style.height = `${cssViewport.height}px`;
+      const context = canvas.getContext("2d", { alpha: false });
+      if (!context) throw new Error("Canvas 2D context is unavailable");
+      const hadReadyCanvas = state.canvasReady;
+      if (!hadReadyCanvas) canvasHost.replaceChildren(canvas);
+      const renderTask = page.render({ canvasContext: context, viewport: renderViewport });
+      state.renderTask = renderTask;
+      renderTask.onContinue = (resume: () => void) => {
+        if (!state.mounted || generation !== state.renderGeneration || (!force && !state.wanted)) {
+          renderTask.cancel();
+          return;
+        }
+        requestAnimationFrame(() => {
+          if (state.mounted && generation === state.renderGeneration && (force || state.wanted)) resume();
+          else renderTask.cancel();
+        });
+      };
+      let rendered = false;
+      try {
+        await renderTask.promise;
+        rendered = true;
+      } catch (error) {
+        if ((error as Error)?.name !== "RenderingCancelledException") throw error;
+      } finally {
+        if (state.renderTask === renderTask) state.renderTask = undefined;
+      }
+      if (!rendered || !state.mounted || generation !== state.renderGeneration || (!force && !state.wanted)) {
+        if (!hadReadyCanvas) {
+          canvas.width = 0;
+          canvas.height = 0;
+          canvas.remove();
+          state.canvasReady = false;
+        }
+        return;
+      }
+      if (hadReadyCanvas) canvasHost.replaceChildren(canvas);
+      state.canvasReady = true;
+      state.canvasDetailReady = fullDetail;
+      state.renderedPixelRatio = targetPixelRatio;
+      this.renderSearchMarks(state.pageNumber);
+      this.renderMarks(state.pageNumber);
+    } finally {
+      state.rendering = false;
+      if (state.wanted && generation !== state.renderGeneration) this.schedulePageMount(state);
+      if (!this.isScrolling && state.canvasReady && (force || state.wanted)) this.scheduleTextLayer(state);
+    }
+  }
+
+  private scheduleTextLayer(state: PageState): void {
+    if (this.isScrolling || !state.wanted || !state.mounted || !state.canvasReady || state.textReady || state.textRendering || state.textTimer) return;
+    if (!this.isPageActuallyVisible(state)) return;
+    const remainingDetailDelay = Math.max(0, this.pageDetailReadyAt - performance.now());
+    state.textTimer = window.setTimeout(() => {
+      state.textTimer = undefined;
+      void this.renderTextLayer(state);
+    }, Math.ceil(remainingDetailDelay) + TEXT_LAYER_IDLE_DELAY_MS);
+  }
+
+  private isPageActuallyVisible(state: PageState): boolean {
+    const pageRect = state.shell.getBoundingClientRect();
+    const rootRect = this.scrollEl.getBoundingClientRect();
+    return pageRect.bottom > rootRect.top && pageRect.top < rootRect.bottom;
+  }
+
+  private async renderTextLayer(state: PageState): Promise<void> {
+    if (this.isScrolling || !state.wanted || !state.mounted || !state.page || !state.textHost || state.textReady || state.textRendering) return;
+    const generation = ++state.textGeneration;
+    state.textRendering = true;
+    const textHost = state.textHost;
+    try {
+      const page = state.page;
+      const cssViewport = page.getViewport({ scale: this.zoom });
       const textContent = await page.getTextContent();
+      if (this.isScrolling || !state.wanted || !state.mounted || generation !== state.textGeneration) return;
+      textHost.empty();
       const textLayer = new (await import("pdfjs-dist/build/pdf.mjs") as any).TextLayer({
         textContentSource: textContent,
         container: textHost,
         viewport: cssViewport,
       });
       state.textTask = textLayer;
-      try { await textLayer.render(); }
-      finally {
+      try {
+        await textLayer.render();
+        if (!this.isScrolling && state.wanted && state.mounted && generation === state.textGeneration) state.textReady = true;
+      } finally {
         if (state.textTask === textLayer) state.textTask = undefined;
       }
-    } catch { /* malformed text layers should not block the page */ }
-    if (!state.mounted || generation !== state.renderGeneration) return;
-    this.renderSearchMarks(state.pageNumber);
-    this.renderMarks(state.pageNumber);
+    } catch { /* malformed or cancelled text layers should not block the page */ }
+    finally {
+      state.textRendering = false;
+      if (!this.isScrolling && state.wanted && !state.textReady && generation !== state.textGeneration) {
+        this.scheduleTextLayer(state);
+      }
+    }
+  }
+
+  private cancelPendingTextLayer(state: PageState): void {
+    if (state.textTimer) window.clearTimeout(state.textTimer);
+    state.textTimer = undefined;
+    if (!state.textRendering) return;
+    state.textGeneration++;
+    state.textTask?.cancel?.();
+    state.textTask = undefined;
+    state.textReady = false;
+    state.textHost?.empty();
+  }
+
+  private cancelPageRender(state: PageState): void {
+    if (!state.renderTask) return;
+    state.renderGeneration++;
+    state.renderTask.cancel?.();
+    state.renderTask = undefined;
   }
 
   private unmountIfFar(state: PageState): void {
     if (state.wanted || !state.mounted) return;
-    state.renderTask?.cancel?.();
-    state.textTask?.cancel?.();
-    state.renderTask = undefined;
-    state.textTask = undefined;
+    this.cancelPageRender(state);
+    this.cancelPendingTextLayer(state);
+    try { state.page?.cleanup?.(); } catch { /* page resources may already be released */ }
     state.page = undefined;
     state.renderGeneration++;
+    state.textGeneration++;
     state.markGeneration++;
     if (state.markFrame) cancelAnimationFrame(state.markFrame);
     this.releasePageLayers(state);
     state.markHitGrid = undefined;
     state.markWideHits = undefined;
     state.mounted = false;
+    state.canvasReady = false;
+    state.canvasDetailReady = false;
+    state.textReady = false;
+    state.renderedPixelRatio = 0;
     this.mountedPages.delete(state);
   }
 
@@ -666,18 +849,24 @@ export class LumenPdfView extends FileView {
     this.rootEl.style.setProperty("--lumen-zoom", String(this.zoom));
     (this.toolbarEl as any)._zoomLabel.textContent = `${Math.round(this.zoom * 100)}%`;
     for (const state of Array.from(this.mountedPages)) {
-      state.renderTask?.cancel?.();
-      state.textTask?.cancel?.();
-      state.renderTask = undefined;
-      state.textTask = undefined;
-      state.page = undefined;
+      this.cancelPageRender(state);
+      this.cancelPendingTextLayer(state);
+      try { state.page?.cleanup?.(); } catch { /* page resources may already be released */ }
       state.renderGeneration++;
+      state.textGeneration++;
       state.markGeneration++;
       if (state.markFrame) cancelAnimationFrame(state.markFrame);
+      this.releasePageLayers(state);
       state.mounted = false;
+      state.rendering = false;
+      state.canvasReady = false;
+      state.canvasDetailReady = false;
+      state.textReady = false;
+      state.renderedPixelRatio = 0;
       this.mountedPages.delete(state);
-      await this.mountPage(state);
+      if (state.wanted) this.schedulePageMount(state);
     }
+    this.pumpPageMounts();
   }
 
   setTheme(theme: PdfTheme): void {
@@ -732,6 +921,62 @@ export class LumenPdfView extends FileView {
     }
     this.currentPage = bestPage;
     (this.toolbarEl as any)._pageInput.value = String(bestPage);
+  }
+
+  private handleScrollActivity(): void {
+    window.clearTimeout(this.pagePreviewTimer);
+    this.pagePreviewTimer = 0;
+    this.pagePreviewReadyAt = Number.POSITIVE_INFINITY;
+    window.clearTimeout(this.pageDetailTimer);
+    this.pageDetailTimer = 0;
+    this.pageDetailReadyAt = Number.POSITIVE_INFINITY;
+    const nextScrollTop = this.scrollEl.scrollTop;
+    if (nextScrollTop !== this.lastScrollTop) this.scrollDirection = nextScrollTop > this.lastScrollTop ? 1 : -1;
+    this.lastScrollTop = nextScrollTop;
+    if (!this.isScrolling) {
+      this.isScrolling = true;
+      for (const state of this.mountedPages) {
+        this.cancelPendingTextLayer(state);
+        if (state.rendering) this.cancelPageRender(state);
+      }
+    }
+    window.clearTimeout(this.scrollIdleTimer);
+    this.scrollIdleTimer = window.setTimeout(() => this.finishScrollActivity(), SCROLL_IDLE_DELAY_MS);
+  }
+
+  private finishScrollActivity(): void {
+    this.scrollIdleTimer = 0;
+    this.isScrolling = false;
+    this.pagePreviewReadyAt = performance.now() + PAGE_PREVIEW_DELAY_MS;
+    this.pageDetailReadyAt = performance.now() + PAGE_DETAIL_DELAY_MS;
+    this.updateCurrentPage();
+    this.pagePreviewTimer = window.setTimeout(() => this.finishPagePreviews(), PAGE_PREVIEW_DELAY_MS);
+    this.pageDetailTimer = window.setTimeout(() => this.finishPageDetails(), PAGE_DETAIL_DELAY_MS);
+  }
+
+  private finishPagePreviews(): void {
+    this.pagePreviewTimer = 0;
+    if (this.isScrolling) return;
+    this.pagePreviewReadyAt = 0;
+    const wanted = Array.from(this.pages.values())
+      .filter(state => state.wanted)
+      .sort((left, right) => Math.abs(left.pageNumber - this.currentPage) - Math.abs(right.pageNumber - this.currentPage));
+    for (const state of wanted) this.schedulePageMount(state);
+    this.pumpPageMounts();
+  }
+
+  private finishPageDetails(): void {
+    this.pageDetailTimer = 0;
+    if (this.isScrolling) return;
+    this.pageDetailReadyAt = 0;
+    const wanted = Array.from(this.pages.values())
+      .filter(state => state.wanted)
+      .sort((left, right) => Math.abs(left.pageNumber - this.currentPage) - Math.abs(right.pageNumber - this.currentPage));
+    for (const state of wanted) {
+      this.schedulePageMount(state);
+      this.scheduleTextLayer(state);
+    }
+    this.pumpPageMounts();
   }
 
   private goToPage(page: number): void {
@@ -1004,17 +1249,6 @@ export class LumenPdfView extends FileView {
         mark.style.top = `${rect.y * 100}%`;
         mark.style.width = `${rect.width * 100}%`;
         mark.style.height = `${rect.height * 100}%`;
-        mark.addEventListener("pointerdown", event => event.stopPropagation());
-        mark.addEventListener("contextmenu", event => {
-          event.preventDefault();
-          event.stopPropagation();
-          this.showAnnotationMenu(event, annotation);
-        });
-        mark.addEventListener("click", event => {
-          event.preventDefault();
-          event.stopPropagation();
-          this.openEditor(annotation, mark);
-        });
       }
     }
   }
@@ -1044,9 +1278,10 @@ export class LumenPdfView extends FileView {
     const drawChunk = () => {
       if (!state.mounted || generation !== state.markGeneration) return;
       let drawn = 0;
-      while (annotationIndex < annotations.length && drawn < MARK_RECTS_PER_FRAME) {
+      const frameBudget = this.isScrolling ? MARK_RECTS_PER_SCROLL_FRAME : MARK_RECTS_PER_FRAME;
+      while (annotationIndex < annotations.length && drawn < frameBudget) {
         const annotation = annotations[annotationIndex];
-        while (rectIndex < annotation.rects.length && drawn < MARK_RECTS_PER_FRAME) {
+        while (rectIndex < annotation.rects.length && drawn < frameBudget) {
           const rect = annotation.rects[rectIndex++];
           this.drawDenseMark(context, annotation, rect, width, height);
           this.addDenseHit(hitGrid, wideHits, annotation, rect);
@@ -1616,8 +1851,8 @@ export class LumenPdfView extends FileView {
         this.goToPage(hit.page);
         const state = this.pages.get(hit.page);
         if (state) {
-          if (state.mounted) this.renderSearchMarks(hit.page);
-          else void this.mountPage(state).then(() => this.renderSearchMarks(hit.page));
+          if (state.canvasReady) this.renderSearchMarks(hit.page);
+          else void this.mountPage(state, true).then(() => this.renderSearchMarks(hit.page));
         }
         state?.shell.classList.add("is-search-flash");
         window.setTimeout(() => state?.shell.classList.remove("is-search-flash"), 850);
@@ -1950,6 +2185,15 @@ export class LumenPdfView extends FileView {
     this.queuedPageMounts.clear();
     cancelAnimationFrame(this.currentPageRaf);
     cancelAnimationFrame(this.inspectorRaf);
+    window.clearTimeout(this.scrollIdleTimer);
+    window.clearTimeout(this.pagePreviewTimer);
+    window.clearTimeout(this.pageDetailTimer);
+    this.scrollIdleTimer = 0;
+    this.pagePreviewTimer = 0;
+    this.pagePreviewReadyAt = 0;
+    this.pageDetailTimer = 0;
+    this.pageDetailReadyAt = 0;
+    this.isScrolling = false;
     for (const state of this.pages.values()) {
       state.wanted = false;
       state.mounted = false;
@@ -1957,11 +2201,14 @@ export class LumenPdfView extends FileView {
       state.textTask?.cancel?.();
       state.renderTask = undefined;
       state.textTask = undefined;
+      try { state.page?.cleanup?.(); } catch { /* page resources may already be released */ }
       state.page = undefined;
       state.renderGeneration++;
+      state.textGeneration++;
       state.markGeneration++;
       if (state.markFrame) cancelAnimationFrame(state.markFrame);
       if (state.unmountTimer) window.clearTimeout(state.unmountTimer);
+      if (state.textTimer) window.clearTimeout(state.textTimer);
       this.releasePageLayers(state);
     }
     this.pages.clear();
