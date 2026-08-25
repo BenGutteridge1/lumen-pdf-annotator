@@ -2,6 +2,19 @@
 
 All notable changes to Lumen PDF Annotator are documented here.
 
+## 1.0.8 — 2026-08-25
+
+- Added an opaque, content-sized selected-text preview beneath the floating extension confirmation; only its text is muted, and long quotes wrap and grow vertically within a bounded surface.
+- Supplied PDF.js's required text-layer scale factor so caret hit-testing, quote extraction, selection geometry, and extension previews remain aligned across zoom levels.
+- Replaced proportional-character estimates with exact rendered text-range geometry for Find in PDF marks on visible pages, keeping the lightweight whole-document index for large-file performance.
+- Centred short extension-preview surfaces beneath their confirmation controls while preserving content-sized growth for longer selections.
+- Preserved narrow and zero-width PDF.js glyph-boundary rectangles when capturing selections, then safely coalesced adjacent fragments so punctuation remains part of the visible mark.
+- Retained the page and zoom restoration introduced in 1.0.7 while correcting release metadata for both versions.
+
+## 1.0.7 — 2026-08-25
+
+- Remembered the last page and zoom level for each PDF and restored them when the document reopens.
+
 ## 1.0.6 — 2026-08-24
 
 - Paused new page rendering during active scrolling and cancelled stale canvas and text-layer work as soon as a page leaves the render window.

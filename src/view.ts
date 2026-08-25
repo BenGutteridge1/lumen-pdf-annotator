@@ -27,6 +27,7 @@ const PAGE_PREVIEW_DELAY_MS = 90;
 const TEXT_LAYER_IDLE_DELAY_MS = 80;
 const PAGE_DETAIL_DELAY_MS = 480;
 const SCROLL_PREVIEW_DPR = .65;
+const SEARCH_WHITESPACE = /\s/;
 
 interface PageState {
   pageNumber: number;
@@ -56,6 +57,7 @@ interface PageState {
   markFrame?: number;
   markHitGrid?: Map<number, PdfAnnotation[]>;
   markWideHits?: PdfAnnotation[];
+  searchTextRuns?: SearchTextRun[];
 }
 
 interface PendingSelection {
@@ -67,10 +69,26 @@ interface PendingSelection {
 
 interface SearchHit {
   page: number;
+  start: number;
+  end: number;
   before: string;
   match: string;
   after: string;
   rects: NormalizedRect[];
+}
+
+interface SearchTextRun {
+  start: number;
+  end: number;
+  element: HTMLElement;
+  charStarts: number[];
+  charEnds: number[];
+}
+
+interface NormalizedSearchText {
+  text: string;
+  charStarts: number[];
+  charEnds: number[];
 }
 
 interface SearchPageData {
@@ -106,6 +124,32 @@ function iconButton(icon: string, label: string, onClick: () => void): HTMLButto
     onClick();
   });
   return button;
+}
+
+function normalizeSearchText(value: string): NormalizedSearchText {
+  let text = "";
+  const charStarts: number[] = [];
+  const charEnds: number[] = [];
+  let pendingSpaceStart = -1;
+  let pendingSpaceEnd = -1;
+  for (let index = 0; index < value.length; index++) {
+    if (SEARCH_WHITESPACE.test(value[index])) {
+      if (text && pendingSpaceStart < 0) pendingSpaceStart = index;
+      if (pendingSpaceStart >= 0) pendingSpaceEnd = index + 1;
+      continue;
+    }
+    if (pendingSpaceStart >= 0) {
+      text += " ";
+      charStarts.push(pendingSpaceStart);
+      charEnds.push(pendingSpaceEnd);
+      pendingSpaceStart = -1;
+      pendingSpaceEnd = -1;
+    }
+    text += value[index];
+    charStarts.push(index);
+    charEnds.push(index + 1);
+  }
+  return { text, charStarts, charEnds };
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -618,6 +662,7 @@ export class LumenPdfView extends FileView {
     state.searchHost = null;
     state.textHost = null;
     state.markHost = null;
+    state.searchTextRuns = undefined;
   }
 
   private schedulePageMount(state: PageState): void {
@@ -783,6 +828,12 @@ export class LumenPdfView extends FileView {
       const cssViewport = page.getViewport({ scale: this.zoom });
       const textContent = await page.getTextContent();
       if (this.isScrolling || !state.wanted || !state.mounted || generation !== state.textGeneration) return;
+      // TextLayer positions glyph runs as percentages but deliberately leaves
+      // font sizes and its own dimensions in terms of PDF.js's scale variable.
+      // Without this value the invisible selection layer stayed near its
+      // browser-default size, so caret offsets and quotes changed with zoom and
+      // no longer matched the visible canvas text.
+      textHost.style.setProperty("--scale-factor", String(cssViewport.scale));
       textHost.empty();
       const textLayer = new (await import("pdfjs-dist/build/pdf.mjs") as any).TextLayer({
         textContentSource: textContent,
@@ -792,7 +843,15 @@ export class LumenPdfView extends FileView {
       state.textTask = textLayer;
       try {
         await textLayer.render();
-        if (!this.isScrolling && state.wanted && state.mounted && generation === state.textGeneration) state.textReady = true;
+        if (!this.isScrolling && state.wanted && state.mounted && generation === state.textGeneration) {
+          state.searchTextRuns = this.buildSearchTextRuns(textLayer);
+          state.textReady = true;
+          // Initial search marks use cheap PDF-item estimates so searching a
+          // large document never builds every text layer. Once a visible page
+          // has its normal selectable layer, replace those estimates with
+          // exact DOM Range geometry for proportional fonts and every zoom.
+          this.renderSearchMarks(state.pageNumber);
+        }
       } finally {
         if (state.textTask === textLayer) state.textTask = undefined;
       }
@@ -813,7 +872,36 @@ export class LumenPdfView extends FileView {
     state.textTask?.cancel?.();
     state.textTask = undefined;
     state.textReady = false;
+    state.searchTextRuns = undefined;
     state.textHost?.empty();
+  }
+
+  private buildSearchTextRuns(textLayer: any): SearchTextRun[] {
+    const elements = textLayer.textDivs as HTMLElement[] | undefined;
+    const sourceItems = textLayer.textContentItemsStr as string[] | undefined;
+    if (!elements?.length || !sourceItems?.length) return [];
+    const runs: SearchTextRun[] = [];
+    let documentOffset = 0;
+    const count = Math.min(elements.length, sourceItems.length);
+    for (let index = 0; index < count; index++) {
+      const source = normalizeSearchText(sourceItems[index] ?? "");
+      if (!source.text) continue;
+      if (documentOffset) documentOffset++;
+      const start = documentOffset;
+      documentOffset += source.text.length;
+      const element = elements[index];
+      if (!element || !element.isConnected) continue;
+      const rendered = normalizeSearchText(element.textContent ?? "");
+      if (rendered.text !== source.text) continue;
+      runs.push({
+        start,
+        end: documentOffset,
+        element,
+        charStarts: rendered.charStarts,
+        charEnds: rendered.charEnds,
+      });
+    }
+    return runs;
   }
 
   private cancelPageRender(state: PageState): void {
@@ -994,9 +1082,20 @@ export class LumenPdfView extends FileView {
   private captureSelection(event: MouseEvent): void {
     const nativeSelection = window.getSelection();
     if (!nativeSelection || nativeSelection.isCollapsed || !nativeSelection.rangeCount) return;
-    const quote = nativeSelection.toString().trim();
+    const range = nativeSelection.getRangeAt(0).cloneRange();
+    const quote = range.toString().replace(/\s+/g, " ").trim();
     if (!quote) return;
-    const rects = Array.from(nativeSelection.getRangeAt(0).getClientRects()).filter(rect => rect.width > 1 && rect.height > 1);
+    // PDF.js can represent punctuation and narrow glyphs as sub-pixel or even
+    // zero-width boundary rectangles. Discarding those anchors made the saved
+    // quote include characters that the visible mark did not. Keep finite line
+    // anchors here; coalescing below absorbs adjacent anchors and removes any
+    // standalone zero-width caret/newline rectangles.
+    const rects = Array.from(range.getClientRects()).filter(rect => Number.isFinite(rect.left)
+      && Number.isFinite(rect.top)
+      && Number.isFinite(rect.width)
+      && Number.isFinite(rect.height)
+      && rect.width >= 0
+      && rect.height > 0);
     if (!rects.length) return;
     const byPage = new Map<number, NormalizedRect[]>();
     const [firstPage, lastPage] = this.pageRangeForClientRects(rects);
@@ -1010,7 +1109,7 @@ export class LumenPdfView extends FileView {
         const right = Math.min(rect.right, pageRect.right);
         const top = Math.max(rect.top, pageRect.top);
         const bottom = Math.min(rect.bottom, pageRect.bottom);
-        if (right <= left || bottom <= top) continue;
+        if (right < left || bottom <= top) continue;
         normalized.push({
           x: (left - pageRect.left) / pageRect.width,
           y: (top - pageRect.top) / pageRect.height,
@@ -1018,12 +1117,48 @@ export class LumenPdfView extends FileView {
           height: (bottom - top) / pageRect.height,
         });
       }
-      if (normalized.length) byPage.set(state.pageNumber, normalized);
+      if (normalized.length) byPage.set(state.pageNumber, this.coalesceSelectionRects(normalized));
     }
     if (!byPage.size) return;
     this.selection = { quote, pages: byPage, x: event.clientX, y: event.clientY };
     if (this.extensionGroupId) this.showExtensionPalette();
     else this.showSelectionPalette();
+  }
+
+  private coalesceSelectionRects(rects: NormalizedRect[]): NormalizedRect[] {
+    const ordered = rects.slice().sort((left, right) => left.y - right.y || left.x - right.x);
+    const merged: NormalizedRect[] = [];
+    for (const rect of ordered) {
+      let match = -1;
+      for (let index = merged.length - 1; index >= 0; index--) {
+        const candidate = merged[index];
+        // Rects are y-sorted, so once the newest candidate is entirely above
+        // this line no earlier entry can match. This keeps long selections
+        // effectively linear instead of comparing every pair of fragments.
+        if (candidate.y + candidate.height < rect.y) break;
+        const overlap = Math.min(candidate.y + candidate.height, rect.y + rect.height) - Math.max(candidate.y, rect.y);
+        const sharedHeight = overlap / Math.max(.000001, Math.min(candidate.height, rect.height));
+        const horizontalDistance = Math.max(0,
+          Math.max(rect.x - (candidate.x + candidate.width), candidate.x - (rect.x + rect.width)));
+        const joinDistance = Math.max(.0015, Math.min(candidate.height, rect.height) * .45);
+        if (sharedHeight >= .72 && horizontalDistance <= joinDistance) {
+          match = index;
+          break;
+        }
+      }
+      if (match >= 0) {
+        const previous = merged[match];
+        const right = Math.max(previous.x + previous.width, rect.x + rect.width);
+        const bottom = Math.max(previous.y + previous.height, rect.y + rect.height);
+        previous.x = Math.min(previous.x, rect.x);
+        previous.y = Math.min(previous.y, rect.y);
+        previous.width = right - previous.x;
+        previous.height = bottom - previous.y;
+      } else {
+        merged.push({ ...rect });
+      }
+    }
+    return merged.filter(rect => rect.width > 0 && rect.height > 0);
   }
 
   private pageRangeForClientRects(rects: DOMRect[]): [number, number] {
@@ -1115,13 +1250,24 @@ export class LumenPdfView extends FileView {
     const palette = document.body.createDiv({ cls: "lumen-selection-palette lumen-extension-palette" });
     this.syncDetachedTheme(palette);
     this.selectionPalette = palette;
-    palette.createSpan({ cls: "lumen-extension-label", text: "Extend annotation" });
-    const actions = palette.createDiv({ cls: "lumen-palette-actions" });
+    const controls = palette.createDiv({ cls: "lumen-extension-controls" });
+    controls.createSpan({ cls: "lumen-extension-label", text: "Extend annotation" });
+    const actions = controls.createDiv({ cls: "lumen-palette-actions" });
     actions.append(iconButton("check", "Apply extension", () => this.commitExtension()));
     actions.append(iconButton("x", "Cancel extension", () => this.cancelExtension()));
-    const width = palette.offsetWidth || 210;
+    palette.createDiv({
+      cls: "lumen-extension-preview",
+      text: pendingSelection.quote,
+      attr: { "aria-label": "Selected text preview", role: "status" },
+    });
+    const width = palette.offsetWidth || 320;
+    const height = palette.offsetHeight || 88;
+    const below = pendingSelection.y + 12;
+    const top = below + height <= window.innerHeight - 12
+      ? below
+      : pendingSelection.y - height - 12;
     palette.style.left = `${clamp(pendingSelection.x - width / 2, 12, window.innerWidth - width - 12)}px`;
-    palette.style.top = `${clamp(pendingSelection.y + 12, 12, window.innerHeight - 96)}px`;
+    palette.style.top = `${clamp(top, 12, window.innerHeight - height - 12)}px`;
   }
 
   private commitExtension(): void {
@@ -1729,6 +1875,8 @@ export class LumenPdfView extends FileView {
           const end = index + query.length;
           hits.push({
             page: pageNumber,
+            start: index,
+            end,
             before: pageData.text.slice(Math.max(0, index - 110), index),
             match: pageData.text.slice(index, end),
             after: pageData.text.slice(end, end + 150),
@@ -1759,7 +1907,7 @@ export class LumenPdfView extends FileView {
     const spans: QuoteTextSpan[] = [];
     for (const raw of content.items) {
       const item = raw as { str?: string; transform?: number[]; width?: number; height?: number };
-      const value = (item.str ?? "").replace(/\s+/g, " ").trim();
+      const value = normalizeSearchText(item.str ?? "").text;
       if (!value) continue;
       if (text) text += " ";
       const start = text.length;
@@ -1871,7 +2019,8 @@ export class LumenPdfView extends FileView {
       : pageHits;
     let rendered = 0;
     for (const hit of ordered) {
-      for (const rect of hit.rects) {
+      const exactRects = state.textReady ? this.searchRectsForRenderedRange(state, hit.start, hit.end) : null;
+      for (const rect of exactRects ?? hit.rects) {
         if (rendered >= MAX_SEARCH_RECTS_PER_PAGE) return;
         const mark = searchHost.createDiv({ cls: "lumen-search-match" });
         mark.classList.toggle("is-current", hit === this.activeSearchHit);
@@ -1882,6 +2031,57 @@ export class LumenPdfView extends FileView {
         rendered++;
       }
     }
+  }
+
+  private searchRectsForRenderedRange(state: PageState, start: number, end: number): NormalizedRect[] | null {
+    if (!state.stage || !state.searchTextRuns?.length || end <= start) return null;
+    const stageRect = state.stage.getBoundingClientRect();
+    if (stageRect.width <= 0 || stageRect.height <= 0) return null;
+    const rects: NormalizedRect[] = [];
+    let coveredUntil = start;
+    let low = 0;
+    let high = state.searchTextRuns.length;
+    while (low < high) {
+      const middle = (low + high) >>> 1;
+      if (state.searchTextRuns[middle].end <= start) low = middle + 1;
+      else high = middle;
+    }
+    for (let index = low; index < state.searchTextRuns.length; index++) {
+      const run = state.searchTextRuns[index];
+      if (run.start >= end) break;
+      const overlapStart = Math.max(start, run.start);
+      const overlapEnd = Math.min(end, run.end);
+      // A one-character gap is the synthetic space inserted between PDF text
+      // items. A larger gap means a rendered run is unavailable, so retain the
+      // complete approximate mark rather than showing partial exact geometry.
+      if (overlapStart - coveredUntil > 1) return null;
+      const localStart = overlapStart - run.start;
+      const localEnd = overlapEnd - run.start;
+      const node = run.element.firstChild;
+      if (!(node instanceof Text) || run.element.childNodes.length !== 1 || localEnd <= localStart) return null;
+      const rawStart = run.charStarts[localStart];
+      const rawEnd = run.charEnds[localEnd - 1];
+      if (rawStart === undefined || rawEnd === undefined || rawEnd <= rawStart || rawEnd > node.length) return null;
+      const range = document.createRange();
+      range.setStart(node, rawStart);
+      range.setEnd(node, rawEnd);
+      for (const clientRect of Array.from(range.getClientRects())) {
+        const left = Math.max(clientRect.left, stageRect.left);
+        const right = Math.min(clientRect.right, stageRect.right);
+        const top = Math.max(clientRect.top, stageRect.top);
+        const bottom = Math.min(clientRect.bottom, stageRect.bottom);
+        if (right <= left || bottom <= top) continue;
+        rects.push({
+          x: (left - stageRect.left) / stageRect.width,
+          y: (top - stageRect.top) / stageRect.height,
+          width: (right - left) / stageRect.width,
+          height: (bottom - top) / stageRect.height,
+        });
+      }
+      coveredUntil = overlapEnd;
+    }
+    if (end - coveredUntil > 1 || !rects.length) return null;
+    return this.coalesceSelectionRects(rects);
   }
 
   private clearSearchFlashes(): void {

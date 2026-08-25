@@ -14,7 +14,7 @@ Lumen is a desktop-first PDF reader for research-heavy vaults. It combines docum
 - A virtualized annotation inspector with bright colour edges, readable quotes, notes, and one-click navigation.
 - A full editor for each saved mark, including colour, style, note, tags, copy, and delete.
 - Right-click any saved highlight to copy a Markdown link that opens its PDF, page, and exact annotation from another note.
-- Extend an existing text annotation from its editor; additional selections can be on the same page, a different page, or span a page boundary while remaining one logical annotation.
+- Extend an existing text annotation from its editor; an opaque, content-sized preview with muted text shows the exact pending quote before confirmation, and additional selections can be on the same page, a different page, or span a page boundary while remaining one logical annotation.
 - Click-to-place page notes, readable exports, checksum verification, and recovery from the local PDF backup.
 
 | Contextual PDF search | Individual annotation editor |
@@ -91,9 +91,9 @@ Lumen currently supports desktop Obsidian 1.13.7 or newer.
 
 Open any PDF after enabling Lumen. The PDF search and annotation inspector begin closed every time a document opens.
 
-Select text to open the compact markup palette. Choose a colour first, then choose a mark type to apply it immediately—there is no separate confirmation step. Choosing the comment type also opens the individual editor so you can add its note. Nothing is saved merely by choosing a swatch. Click an existing mark or its inspector card to open the individual editor. Use the sticky-note icon or **Place a page note** command to place a note anywhere on a page. PDF search marks every exact match on the rendered page and strengthens the selected result. The toolbar's theme controls affect the reading surface and editor together; the chosen theme persists and Lumen button text and icons follow your Obsidian accent colour in every PDF theme.
+Select text to open the compact markup palette. Choose a colour first, then choose a mark type to apply it immediately—there is no separate confirmation step. Choosing the comment type also opens the individual editor so you can add its note. Nothing is saved merely by choosing a swatch. Click an existing mark or its inspector card to open the individual editor. Use the sticky-note icon or **Place a page note** command to place a note anywhere on a page. PDF search marks every exact match on the rendered page, upgrades visible results to PDF.js's exact text-range geometry at every zoom level, and strengthens the selected result. The toolbar's theme controls affect the reading surface and editor together; the chosen theme persists and Lumen button text and icons follow your Obsidian accent colour in every PDF theme.
 
-Right-click a saved mark and choose **Copy link to highlight**. Paste the resulting Markdown link into any note in the same vault; following it opens the PDF in a new tab, scrolls to the linked annotation, flashes it, and opens its editor. To add more text to a saved annotation, open its editor and use the scan-text icon. Navigate if needed, select the additional text, and confirm the floating **Extend annotation** action. Cross-page segments share colour, style, note, tags, link target, inspector card, and deletion as one annotation.
+Right-click a saved mark and choose **Copy link to highlight**. Paste the resulting Markdown link into any note in the same vault; following it opens the PDF in a new tab, scrolls to the linked annotation, flashes it, and opens its editor. To add more text to a saved annotation, open its editor and use the scan-text icon. Navigate if needed, select the additional text, check the opaque quote preview with muted text beneath the floating **Extend annotation** action, and confirm. Cross-page segments share colour, style, note, tags, link target, inspector card, and deletion as one annotation.
 
 Default hotkeys:
 
