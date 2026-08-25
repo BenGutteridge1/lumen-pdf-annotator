@@ -48,7 +48,7 @@ export class PdfViewStateManager {
     this.attached.add(root);
 
     const saved = this.data.pdfs[view.file.path];
-    if (saved) this.restore(view, root, saved);
+    if (saved) this.restoreWhenReady(view, root, saved);
 
     let timer = 0;
     const capture = () => {
@@ -80,6 +80,15 @@ export class PdfViewStateManager {
 
   attachAll(): void {
     for (const leaf of this.plugin.app.workspace.getLeavesOfType(LUMEN_VIEW_TYPE)) this.attach(leaf);
+  }
+
+  private restoreWhenReady(view: LumenPdfView, root: HTMLElement, state: PdfViewState, attempts = 0): void {
+    const total = root.querySelector<HTMLElement>(".lumen-page-total")?.textContent;
+    if (total === "–" && attempts < 40) {
+      window.setTimeout(() => this.restoreWhenReady(view, root, state, attempts + 1), 50);
+      return;
+    }
+    this.restore(view, root, state);
   }
 
   private restore(view: LumenPdfView, root: HTMLElement, state: PdfViewState): void {
