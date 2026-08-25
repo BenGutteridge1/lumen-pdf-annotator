@@ -12,6 +12,11 @@ interface PdfViewStateData {
   pdfs: Record<string, PdfViewState>;
 }
 
+interface PluginDataWithViewState {
+  pdfViewState?: Partial<PdfViewStateData>;
+  [key: string]: unknown;
+}
+
 const SAVE_DELAY_MS = 450;
 const MAX_ENTRIES = 2000;
 
@@ -29,8 +34,9 @@ export class PdfViewStateManager {
   constructor(private readonly plugin: Plugin) {}
 
   async load(): Promise<void> {
-    const loaded = await this.plugin.loadData() as Partial<PdfViewStateData> | null;
-    const pdfs = loaded?.pdfs && typeof loaded.pdfs === "object" ? loaded.pdfs : {};
+    const loaded = await this.plugin.loadData() as PluginDataWithViewState | null;
+    const stored = loaded?.pdfViewState;
+    const pdfs = stored?.pdfs && typeof stored.pdfs === "object" ? stored.pdfs : {};
     this.data = { version: 1, pdfs: pdfs as Record<string, PdfViewState> };
   }
 
@@ -77,13 +83,6 @@ export class PdfViewStateManager {
     for (const leaf of this.plugin.app.workspace.getLeavesOfType(LUMEN_VIEW_TYPE)) this.attach(leaf);
   }
 
-  detachAll(): void {
-    for (const leaf of this.plugin.app.workspace.getLeavesOfType(LUMEN_VIEW_TYPE)) {
-      const root = leaf.view.containerEl.querySelector<HTMLElement>(".lumen-reader");
-      if (root) this.cleanups.get(root)?.();
-    }
-  }
-
   private restore(root: HTMLElement, state: PdfViewState): void {
     const zoomLabel = root.querySelector<HTMLElement>(".lumen-zoom-label");
     const pageInput = root.querySelector<HTMLInputElement>(".lumen-page-input");
@@ -98,8 +97,7 @@ export class PdfViewStateManager {
     }
     if (pageInput) pageInput.value = String(page);
     window.setTimeout(() => {
-      const input = root.querySelector<HTMLInputElement>(".lumen-page-input");
-      input?.dispatchEvent(new Event("change", { bubbles: true }));
+      root.querySelector<HTMLInputElement>(".lumen-page-input")?.dispatchEvent(new Event("change", { bubbles: true }));
     }, 0);
   }
 
@@ -110,10 +108,9 @@ export class PdfViewStateManager {
     const zoom = Number.parseInt(root.querySelector<HTMLElement>(".lumen-zoom-label")?.textContent ?? "125", 10) / 100;
     if (!Number.isFinite(page) || !Number.isFinite(zoom)) return;
     this.data.pdfs[path] = { page: Math.max(1, page), zoom: Math.max(0.5, Math.min(4, zoom)), updatedAt: Date.now() };
-    const entries = Object.entries(this.data.pdfs)
+    this.data.pdfs = Object.fromEntries(Object.entries(this.data.pdfs)
       .sort((a, b) => b[1].updatedAt - a[1].updatedAt)
-      .slice(0, MAX_ENTRIES);
-    this.data.pdfs = Object.fromEntries(entries);
+      .slice(0, MAX_ENTRIES));
     this.scheduleSave();
   }
 
@@ -121,9 +118,13 @@ export class PdfViewStateManager {
     if (this.saveTimer !== null) return;
     this.saveTimer = window.setTimeout(() => {
       this.saveTimer = null;
-      const snapshot = this.data;
-      this.saveChain = this.saveChain.catch(() => undefined).then(() => this.plugin.saveData(snapshot));
+      this.saveChain = this.saveChain.catch(() => undefined).then(() => this.writeMergedData());
     }, SAVE_DELAY_MS);
+  }
+
+  private async writeMergedData(): Promise<void> {
+    const existing = await this.plugin.loadData() as PluginDataWithViewState | null;
+    await this.plugin.saveData({ ...(existing ?? {}), pdfViewState: this.data });
   }
 
   async flush(): Promise<void> {
@@ -131,7 +132,7 @@ export class PdfViewStateManager {
       window.clearTimeout(this.saveTimer);
       this.saveTimer = null;
     }
-    this.saveChain = this.saveChain.catch(() => undefined).then(() => this.plugin.saveData(this.data));
+    this.saveChain = this.saveChain.catch(() => undefined).then(() => this.writeMergedData());
     await this.saveChain;
   }
 }
