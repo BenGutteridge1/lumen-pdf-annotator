@@ -65,7 +65,7 @@ export class PdfViewStateManager {
     const mutationObserver = host ? new MutationObserver(() => {
       if (!document.contains(root)) cleanup();
     }) : null;
-    mutationObserver?.observe(host!, { childList: true, subtree: true });
+    mutationObserver?.observe(host!, { childList: true });
 
     cleanup = () => {
       window.clearTimeout(timer);
