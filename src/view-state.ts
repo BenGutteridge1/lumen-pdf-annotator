@@ -47,9 +47,8 @@ export class PdfViewStateManager {
     if (!root || this.attached.has(root)) return;
     this.attached.add(root);
 
-    const path = view.file.path;
-    const saved = this.data.pdfs[path];
-    if (saved) this.restore(root, saved);
+    const saved = this.data.pdfs[view.file.path];
+    if (saved) this.restore(view, root, saved);
 
     let timer = 0;
     const capture = () => {
@@ -83,22 +82,19 @@ export class PdfViewStateManager {
     for (const leaf of this.plugin.app.workspace.getLeavesOfType(LUMEN_VIEW_TYPE)) this.attach(leaf);
   }
 
-  private restore(root: HTMLElement, state: PdfViewState): void {
+  private restore(view: LumenPdfView, root: HTMLElement, state: PdfViewState): void {
     const zoomLabel = root.querySelector<HTMLElement>(".lumen-zoom-label");
-    const pageInput = root.querySelector<HTMLInputElement>(".lumen-page-input");
-    const zoom = Math.max(0.5, Math.min(4, Math.round(state.zoom * 4) / 4));
+    const desiredZoom = Math.max(0.5, Math.min(4, Math.round(state.zoom * 4) / 4));
     const page = Math.max(1, Math.round(state.page));
     const currentZoom = Number.parseInt(zoomLabel?.textContent ?? "125", 10) / 100;
-    const delta = Math.round((zoom - currentZoom) * 4);
-    if (delta !== 0) {
-      const buttons = root.querySelectorAll<HTMLButtonElement>(".lumen-zoom-group .lumen-icon-button");
-      const button = delta > 0 ? buttons[1] : buttons[0];
-      for (let i = 0; i < Math.abs(delta); i++) button?.click();
+    const applyPage = () => window.setTimeout(() => (view as unknown as { goToPage: (page: number) => void }).goToPage(page), 0);
+    if (Math.abs(desiredZoom - currentZoom) < 0.001) {
+      applyPage();
+      return;
     }
-    if (pageInput) pageInput.value = String(page);
-    window.setTimeout(() => {
-      root.querySelector<HTMLInputElement>(".lumen-page-input")?.dispatchEvent(new Event("change", { bubbles: true }));
-    }, 0);
+    void (view as unknown as { setZoom: (zoom: number) => Promise<void> }).setZoom(desiredZoom)
+      .then(applyPage)
+      .catch(error => console.warn("Lumen could not restore PDF view state", error));
   }
 
   private capture(view: LumenPdfView, root: HTMLElement): void {
