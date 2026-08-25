@@ -3,6 +3,7 @@ import { LUMEN_PROTOCOL_ACTION } from "./links";
 import { disposePdfRuntime } from "./pdf-runtime";
 import { BundleInfo, listBundles, restoreBundle, verifyBundle } from "./storage";
 import { LumenPdfView, LUMEN_VIEW_TYPE, PdfTheme } from "./view";
+import { PdfViewStateManager } from "./view-state";
 
 interface LumenSettings {
   defaultViewer: boolean;
@@ -25,10 +26,13 @@ interface ViewRegistryWithExtensions {
 export default class LumenPdfPlugin extends Plugin {
   settings: LumenSettings = DEFAULT_SETTINGS;
   private settingsWrite: Promise<void> = Promise.resolve();
+  private viewState!: PdfViewStateManager;
 
   async onload(): Promise<void> {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
     if (!["light", "sepia", "dark"].includes(this.settings.pdfTheme)) this.settings.pdfTheme = DEFAULT_SETTINGS.pdfTheme;
+    this.viewState = new PdfViewStateManager(this);
+    await this.viewState.load();
     this.registerView(LUMEN_VIEW_TYPE, leaf => new LumenPdfView(
       leaf,
       this.settings.pdfTheme,
@@ -75,9 +79,16 @@ export default class LumenPdfPlugin extends Plugin {
     this.addCommand({ id: "verify-pdf-backups", name: "Verify all PDF backup checksums", callback: () => void this.verifyAllBackups() });
     this.addCommand({ id: "restore-backed-up-pdf", name: "Restore a backed-up PDF", callback: () => void this.chooseBackupToRestore() });
     this.addSettingTab(new LumenSettingTab(this));
+
+    this.registerEvent(this.app.workspace.on("layout-change", () => this.viewState.attachAll()));
+    this.registerEvent(this.app.workspace.on("active-leaf-change", leaf => {
+      if (leaf) this.viewState.attach(leaf);
+    }));
+    window.setTimeout(() => this.viewState.attachAll(), 0);
   }
 
   onunload(): void {
+    void this.viewState?.flush().catch(error => console.error("Lumen could not flush PDF view state", error));
     disposePdfRuntime();
   }
 
