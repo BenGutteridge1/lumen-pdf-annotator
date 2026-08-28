@@ -1,4 +1,5 @@
-import { FuzzySuggestModal, normalizePath, Notice, ObsidianProtocolData, Plugin, PluginSettingTab, Setting, TFile, WorkspaceLeaf } from "obsidian";
+import { FuzzySuggestModal, normalizePath, Notice, ObsidianProtocolData, Plugin, PluginSettingTab, TFile } from "obsidian";
+import type { SettingDefinitionItem } from "obsidian";
 import { LUMEN_PROTOCOL_ACTION } from "./links";
 import { disposePdfRuntime } from "./pdf-runtime";
 import { BundleInfo, listBundles, restoreBundle, verifyBundle } from "./storage";
@@ -19,6 +20,21 @@ const DEFAULT_SETTINGS: LumenSettings = {
   automaticPdfBackups: false,
 };
 
+function isPdfTheme(value: unknown): value is PdfTheme {
+  return value === "light" || value === "sepia" || value === "dark";
+}
+
+function readSettings(value: unknown): LumenSettings {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return { ...DEFAULT_SETTINGS };
+  const stored = value as Record<string, unknown>;
+  return {
+    defaultViewer: typeof stored.defaultViewer === "boolean" ? stored.defaultViewer : DEFAULT_SETTINGS.defaultViewer,
+    pdfTheme: isPdfTheme(stored.pdfTheme) ? stored.pdfTheme : DEFAULT_SETTINGS.pdfTheme,
+    legacyAnnotationFolder: typeof stored.legacyAnnotationFolder === "string" ? stored.legacyAnnotationFolder : DEFAULT_SETTINGS.legacyAnnotationFolder,
+    automaticPdfBackups: typeof stored.automaticPdfBackups === "boolean" ? stored.automaticPdfBackups : DEFAULT_SETTINGS.automaticPdfBackups,
+  };
+}
+
 interface ViewRegistryWithExtensions {
   typeByExtension: Record<string, string>;
 }
@@ -29,8 +45,7 @@ export default class LumenPdfPlugin extends Plugin {
   private viewState!: PdfViewStateManager;
 
   async onload(): Promise<void> {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
-    if (!["light", "sepia", "dark"].includes(this.settings.pdfTheme)) this.settings.pdfTheme = DEFAULT_SETTINGS.pdfTheme;
+    this.settings = readSettings(await this.loadData() as unknown);
     this.viewState = new PdfViewStateManager(this);
     await this.viewState.load();
     this.registerView(LUMEN_VIEW_TYPE, leaf => new LumenPdfView(
@@ -124,9 +139,9 @@ export default class LumenPdfPlugin extends Plugin {
     });
   }
 
-  private async openFile(file: TFile, leaf = this.app.workspace.getLeaf(false) as WorkspaceLeaf): Promise<LumenPdfView | null> {
+  private async openFile(file: TFile, leaf = this.app.workspace.getLeaf(false)): Promise<LumenPdfView | null> {
     await leaf.setViewState({ type: LUMEN_VIEW_TYPE, active: true, state: { file: file.path } });
-    this.app.workspace.revealLeaf(leaf);
+    await this.app.workspace.revealLeaf(leaf);
     return leaf.view instanceof LumenPdfView ? leaf.view : null;
   }
 
@@ -147,7 +162,7 @@ export default class LumenPdfPlugin extends Plugin {
       new Notice("The PDF for this Lumen highlight link could not be found.");
       return;
     }
-    const leaf = this.app.workspace.getLeaf("tab") as WorkspaceLeaf;
+    const leaf = this.app.workspace.getLeaf("tab");
     const view = await this.openFile(target, leaf);
     if (!view || !(await view.revealAnnotation(params.annotation))) {
       new Notice("The linked highlight could not be found in this PDF.");
@@ -209,15 +224,17 @@ class BackupRestoreModal extends FuzzySuggestModal<BundleInfo> {
 
   getItems(): BundleInfo[] { return this.bundles; }
   getItemText(item: BundleInfo): string { return `${item.manifest.originalName} — ${item.manifest.workingPath}`; }
-  async onChooseItem(item: BundleInfo): Promise<void> {
-    try {
-      const file = await restoreBundle(this.plugin.app.vault, item);
-      new Notice(`Restored ${file.path}`);
-      await this.plugin.app.workspace.getLeaf(true).openFile(file);
-    } catch (error) {
+  onChooseItem(item: BundleInfo): void {
+    void this.restore(item).catch(error => {
       console.error("Lumen restore failed", error);
       new Notice(`Restore failed: ${error instanceof Error ? error.message : String(error)}`, 8000);
-    }
+    });
+  }
+
+  private async restore(item: BundleInfo): Promise<void> {
+    const file = await restoreBundle(this.plugin.app.vault, item);
+    new Notice(`Restored ${file.path}`);
+    await this.plugin.app.workspace.getLeaf(true).openFile(file);
   }
 }
 
@@ -226,41 +243,54 @@ class LumenSettingTab extends PluginSettingTab {
     super(plugin.app, plugin);
   }
 
-  display(): void {
-    this.containerEl.empty();
-    new Setting(this.containerEl)
-      .setName("Make Lumen the default PDF viewer")
-      .setDesc("Open PDFs in Lumen after the next Obsidian restart.")
-      .addToggle(toggle => toggle.setValue(this.plugin.settings.defaultViewer).onChange(async value => {
-        this.plugin.settings.defaultViewer = value;
-        await this.plugin.saveSettings();
+  getSettingDefinitions(): SettingDefinitionItem[] {
+    return [
+      {
+        name: "Make Lumen the default PDF viewer",
+        desc: "Open PDFs in Lumen after the next Obsidian restart.",
+        control: { type: "toggle", key: "defaultViewer", defaultValue: DEFAULT_SETTINGS.defaultViewer },
+      },
+      {
+        name: "PDF theme",
+        desc: "Use this document theme for every Lumen reader.",
+        control: { type: "dropdown", key: "pdfTheme", options: { light: "Light", sepia: "Sepia", dark: "Dark" }, defaultValue: DEFAULT_SETTINGS.pdfTheme },
+      },
+      {
+        name: "Legacy annotation folder",
+        desc: "Look here for older Markdown annotation notes that target the open PDF.",
+        control: { type: "text", key: "legacyAnnotationFolder", placeholder: "PDF annotations", defaultValue: DEFAULT_SETTINGS.legacyAnnotationFolder },
+      },
+      {
+        name: "Create automatic PDF recovery copies",
+        desc: "Copy each opened PDF into Lumen's recovery storage in the background. Keep this off for the smoothest large-PDF and cloud-vault performance.",
+        control: { type: "toggle", key: "automaticPdfBackups", defaultValue: DEFAULT_SETTINGS.automaticPdfBackups },
+      },
+    ];
+  }
+
+  getControlValue(key: string): unknown {
+    if (key === "defaultViewer") return this.plugin.settings.defaultViewer;
+    if (key === "pdfTheme") return this.plugin.settings.pdfTheme;
+    if (key === "legacyAnnotationFolder") return this.plugin.settings.legacyAnnotationFolder;
+    if (key === "automaticPdfBackups") return this.plugin.settings.automaticPdfBackups;
+    return undefined;
+  }
+
+  setControlValue(key: string, value: unknown): void | Promise<void> {
+    if (key === "defaultViewer" && typeof value === "boolean") {
+      this.plugin.settings.defaultViewer = value;
+      return this.plugin.saveSettings().then(() => {
         new Notice("Restart Obsidian to apply the PDF viewer change.");
-      }));
-    new Setting(this.containerEl)
-      .setName("PDF theme")
-      .setDesc("Use this document theme for every Lumen reader.")
-      .addDropdown(dropdown => dropdown
-        .addOptions({ light: "Light", sepia: "Sepia", dark: "Dark" })
-        .setValue(this.plugin.settings.pdfTheme)
-        .onChange(async value => {
-          await this.plugin.setPdfTheme(value as PdfTheme);
-        }));
-    new Setting(this.containerEl)
-      .setName("Legacy annotation folder")
-      .setDesc("Look here for older Markdown annotation notes that target the open PDF.")
-      .addText(text => text
-        .setPlaceholder("PDF annotations")
-        .setValue(this.plugin.settings.legacyAnnotationFolder)
-        .onChange(async value => {
-          this.plugin.settings.legacyAnnotationFolder = value.trim().replace(/^\/+|\/+$/g, "") || "PDF annotations";
-          await this.plugin.saveSettings();
-        }));
-    new Setting(this.containerEl)
-      .setName("Create automatic PDF recovery copies")
-      .setDesc("Copy each opened PDF into Lumen's recovery storage in the background. Keep this off for the smoothest large-PDF and cloud-vault performance.")
-      .addToggle(toggle => toggle.setValue(this.plugin.settings.automaticPdfBackups).onChange(async value => {
-        this.plugin.settings.automaticPdfBackups = value;
-        await this.plugin.saveSettings();
-      }));
+      });
+    }
+    if (key === "pdfTheme" && isPdfTheme(value)) return this.plugin.setPdfTheme(value);
+    if (key === "legacyAnnotationFolder" && typeof value === "string") {
+      this.plugin.settings.legacyAnnotationFolder = value.trim().replace(/^\/+|\/+$/g, "") || "PDF annotations";
+      return this.plugin.saveSettings();
+    }
+    if (key === "automaticPdfBackups" && typeof value === "boolean") {
+      this.plugin.settings.automaticPdfBackups = value;
+      return this.plugin.saveSettings();
+    }
   }
 }

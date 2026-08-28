@@ -142,14 +142,14 @@ async function snapshotMarkdown(annotations: PdfAnnotation[], pdfPath: string, h
 }
 
 function yieldToHost(): Promise<void> {
-  return new Promise(resolve => globalThis.setTimeout(resolve, 0));
+  return new Promise(resolve => window.setTimeout(resolve, 0));
 }
 
 function schedulePdfBackup(vault: Vault, sourcePath: string, backupPath: string): void {
   // A full PDF copy is useful for recovery, but it must never sit on the
   // document-open critical path. DataAdapter.copy performs the filesystem work
   // without constructing another large ArrayBuffer in the renderer process.
-  globalThis.setTimeout(() => {
+  window.setTimeout(() => {
     void (async () => {
       if (await vault.adapter.exists(backupPath)) return;
       const partialPath = `${backupPath}.partial`;
@@ -208,7 +208,10 @@ async function compactSnapshot(annotations: PdfAnnotation[]): Promise<string> {
   return chunks.join("");
 }
 
-const VALID_STYLES = new Set<MarkStyle>(["highlight", "underline", "dashed", "dotted", "strike", "box", "comment"]);
+function isMarkStyle(value: unknown): value is MarkStyle {
+  return value === "highlight" || value === "underline" || value === "dashed" || value === "dotted"
+    || value === "strike" || value === "box" || value === "comment";
+}
 
 function finite(value: unknown, fallback: number): number {
   const number = Number(value);
@@ -241,7 +244,7 @@ function normalizeAnnotation(value: unknown): PdfAnnotation | null {
   });
   if (!rects.length) return null;
   const createdAt = finite(item.createdAt, Date.now());
-  const style = typeof item.style === "string" && VALID_STYLES.has(item.style as MarkStyle) ? item.style as MarkStyle : "highlight";
+  const style = isMarkStyle(item.style) ? item.style : "highlight";
   return {
     id: item.id,
     groupId: typeof item.groupId === "string" && item.groupId.trim() ? item.groupId : undefined,

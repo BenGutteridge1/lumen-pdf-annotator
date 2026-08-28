@@ -34,10 +34,13 @@ export class PdfViewStateManager {
   constructor(private readonly plugin: Plugin) {}
 
   async load(): Promise<void> {
-    const loaded = await this.plugin.loadData() as PluginDataWithViewState | null;
-    const stored = loaded?.pdfViewState;
+    const loaded: unknown = await this.plugin.loadData() as unknown;
+    const data = typeof loaded === "object" && loaded !== null && !Array.isArray(loaded)
+      ? loaded as PluginDataWithViewState
+      : null;
+    const stored = data?.pdfViewState;
     const pdfs = stored?.pdfs && typeof stored.pdfs === "object" ? stored.pdfs : {};
-    this.data = { version: 1, pdfs: pdfs as Record<string, PdfViewState> };
+    this.data = { version: 1, pdfs };
   }
 
   attach(leaf: WorkspaceLeaf): void {
@@ -96,12 +99,12 @@ export class PdfViewStateManager {
     const desiredZoom = Math.max(0.5, Math.min(4, Math.round(state.zoom * 4) / 4));
     const page = Math.max(1, Math.round(state.page));
     const currentZoom = Number.parseInt(zoomLabel?.textContent ?? "125", 10) / 100;
-    const applyPage = () => window.setTimeout(() => (view as unknown as { goToPage: (page: number) => void }).goToPage(page), 0);
+    const applyPage = () => window.setTimeout(() => view.restorePage(page), 0);
     if (Math.abs(desiredZoom - currentZoom) < 0.001) {
       applyPage();
       return;
     }
-    void (view as unknown as { setZoom: (zoom: number) => Promise<void> }).setZoom(desiredZoom)
+    void view.restoreZoom(desiredZoom)
       .then(applyPage)
       .catch(error => console.warn("Lumen could not restore PDF view state", error));
   }
@@ -128,7 +131,10 @@ export class PdfViewStateManager {
   }
 
   private async writeMergedData(): Promise<void> {
-    const existing = await this.plugin.loadData() as PluginDataWithViewState | null;
+    const loaded: unknown = await this.plugin.loadData() as unknown;
+    const existing = typeof loaded === "object" && loaded !== null && !Array.isArray(loaded)
+      ? loaded as PluginDataWithViewState
+      : null;
     await this.plugin.saveData({ ...(existing ?? {}), pdfViewState: this.data });
   }
 

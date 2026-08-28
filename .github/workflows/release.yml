@@ -3,7 +3,7 @@ name: Release plugin
 on:
   push:
     tags:
-      - "[0-9]+.[0-9]+.[0-9]+"
+      - "[0-9]*.[0-9]*.[0-9]*"
 
 permissions:
   contents: write
@@ -11,6 +11,10 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -21,32 +25,35 @@ jobs:
           node-version: 20
           cache: npm
 
-      - name: Verify tag and manifest versions
-        shell: bash
-        run: |
-          manifest_version="$(node -p "require('./manifest.json').version")"
-          package_version="$(node -p "require('./package.json').version")"
-          test "$GITHUB_REF_NAME" = "$manifest_version"
-          test "$manifest_version" = "$package_version"
-
       - name: Install dependencies
         run: npm ci
 
-      - name: Typecheck and build
-        run: npm run build
+      - name: Verify source
+        run: npm run typecheck && npm run lint && npm run build
 
-      - name: Create release archive
-        run: zip -j "lumen-pdf-annotator-${GITHUB_REF_NAME}.zip" dist/main.js dist/manifest.json dist/styles.css LICENSE THIRD_PARTY_NOTICES.md licenses/Apache-2.0.txt
+      - name: Verify tag matches manifest
+        run: |
+          manifest_version="$(node -p "require('./manifest.json').version")"
+          package_version="$(node -p "require('./package.json').version")"
+          test "${GITHUB_REF_NAME}" = "${manifest_version}"
+          test "${manifest_version}" = "${package_version}"
+
+      - name: Attest main.js
+        uses: actions/attest@v4
+        with:
+          subject-path: dist/main.js
+
+      - name: Attest styles.css
+        uses: actions/attest@v4
+        with:
+          subject-path: dist/styles.css
 
       - name: Publish GitHub release
-        uses: softprops/action-gh-release@v2
-        with:
-          body_path: CHANGELOG.md
-          files: |
-            dist/main.js
-            dist/manifest.json
-            dist/styles.css
-            LICENSE
-            THIRD_PARTY_NOTICES.md
-            licenses/Apache-2.0.txt
-            lumen-pdf-annotator-${{ github.ref_name }}.zip
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" dist/main.js dist/manifest.json dist/styles.css --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" dist/main.js dist/manifest.json dist/styles.css --title "Lumen PDF Annotator ${GITHUB_REF_NAME}" --generate-notes
+          fi

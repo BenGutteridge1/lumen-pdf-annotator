@@ -2,6 +2,13 @@
 
 All notable changes to Lumen PDF Annotator are documented here.
 
+## 1.0.9 — 2026-08-28
+
+- Added official ESLint tooling, PDF.js declarations, safer data normalization, and typed view-state restoration while preserving the existing runtime behavior and UI.
+- Added declarative settings definitions for Obsidian settings search without changing the four existing settings, controls, or their appearance.
+- Limited future release artifacts to `main.js`, `manifest.json`, and `styles.css`, with GitHub provenance attestations for the JavaScript and CSS artifacts.
+- Made no runtime feature, performance architecture, or CSS changes in this review release.
+
 ## 1.0.8 — 2026-08-25
 
 - Added an opaque, content-sized selected-text preview beneath the floating extension confirmation; only its text is muted, and long quotes wrap and grow vertically within a bounded surface.
