@@ -2,6 +2,12 @@
 
 All notable changes to Lumen PDF Annotator are documented here.
 
+## 1.0.11 — 2026-08-29
+
+- Repaired release packaging with a valid dependency lockfile so automated reviews can resolve the existing TypeScript and Obsidian dependencies correctly.
+- Restored GitHub provenance attestations for the JavaScript and CSS release assets.
+- Made no source-code, stylesheet, feature, appearance, storage, or performance changes from 1.0.10.
+
 ## 1.0.10 — 2026-08-29
 
 - Replaced stylesheet priority flags with scoped, higher-specificity equivalents while preserving every existing visual value and interaction state.
