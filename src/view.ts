@@ -1978,7 +1978,11 @@ export class LumenPdfView extends FileView {
     while (this.pageTextCache.size
       && (this.pageTextCacheChars + data.text.length > MAX_SEARCH_CACHE_CHARS
         || this.pageTextCacheSpans + data.spans.length > MAX_SEARCH_CACHE_SPANS)) {
-      const oldestPage = this.pageTextCache.keys().next().value as number | undefined;
+      let oldestPage: number | undefined;
+      for (const pageNumber of this.pageTextCache.keys()) {
+        oldestPage = pageNumber;
+        break;
+      }
       if (oldestPage === undefined) break;
       const oldest = this.pageTextCache.get(oldestPage);
       this.pageTextCache.delete(oldestPage);
