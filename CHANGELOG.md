@@ -2,6 +2,12 @@
 
 All notable changes to Lumen PDF Annotator are documented here.
 
+## 1.0.10 — 2026-08-29
+
+- Replaced stylesheet priority flags with scoped, higher-specificity equivalents while preserving every existing visual value and interaction state.
+- Removed the final source-code review warning without changing the bounded PDF search-cache eviction behavior.
+- Kept PDF.js network and base64 capabilities intact because stripping them could break valid documents; Lumen continues to load PDF bytes locally with auto-fetch and worker fetch disabled.
+
 ## 1.0.9 — 2026-08-28
 
 - Added official ESLint tooling, PDF.js declarations, safer data normalization, and typed view-state restoration while preserving the existing runtime behavior and UI.
