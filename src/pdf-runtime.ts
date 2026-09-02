@@ -7,17 +7,30 @@ let sequence = 0;
 
 export { pdfjs };
 
-export function createPdfWorker(): { apiWorker: PDFWorker; port: Worker } {
+function getWorkerUrl(): string {
   if (!workerUrl) {
     workerUrl = URL.createObjectURL(new Blob([workerSource], { type: "text/javascript" }));
   }
-  const port = new Worker(workerUrl, { type: "module" });
+  return workerUrl;
+}
+
+export function createPdfWorker(): { apiWorker: PDFWorker; port: Worker } {
+  const port = new Worker(getWorkerUrl(), { type: "module" });
   const apiWorker = new pdfjs.PDFWorker({ name: `lumen-${++sequence}`, port });
   return { apiWorker, port };
 }
 
-export async function loadPdf(bytes: ArrayBuffer): Promise<{ document: PDFDocumentProxy; worker: PDFWorker; port: Worker }> {
-  const { apiWorker, port } = createPdfWorker();
+export async function loadPdf(
+  bytes: ArrayBuffer,
+  managedWorker = false,
+): Promise<{ document: PDFDocumentProxy; worker: PDFWorker; port: Worker | null }> {
+  // Keep the existing explicit-port path on desktop. On mobile, allow PDF.js
+  // to own worker startup so it can transparently fall back to its loopback
+  // worker if a particular Capacitor WebView rejects blob-backed workers.
+  const explicit = managedWorker ? null : createPdfWorker();
+  if (managedWorker) pdfjs.GlobalWorkerOptions.workerSrc = getWorkerUrl();
+  const apiWorker = explicit?.apiWorker ?? new pdfjs.PDFWorker({ name: `lumen-mobile-${++sequence}` });
+  const port = explicit?.port ?? null;
   try {
     const task = pdfjs.getDocument({
       // Bundle discovery has finished reading these bytes. Let PDF.js transfer
@@ -32,7 +45,7 @@ export async function loadPdf(bytes: ArrayBuffer): Promise<{ document: PDFDocume
     return { document: await task.promise, worker: apiWorker, port };
   } catch (error) {
     try { await Promise.resolve(apiWorker.destroy()); } catch { /* worker setup may have failed before initialization */ }
-    port.terminate();
+    port?.terminate();
     throw error;
   }
 }

@@ -1,4 +1,4 @@
-import { FileView, Menu, Notice, Scope, setIcon, TFile, WorkspaceLeaf } from "obsidian";
+import { FileView, Menu, Notice, Platform, Scope, setIcon, TFile, WorkspaceLeaf } from "obsidian";
 import type { PDFDocumentProxy, PDFPageProxy, PDFWorker, RenderTask, TextContent, TextItem } from "pdfjs-dist/types/src/display/api";
 import type { TextLayer } from "pdfjs-dist/types/src/display/text_layer";
 import { annotationMarkdownLink } from "./links";
@@ -30,6 +30,24 @@ const TEXT_LAYER_IDLE_DELAY_MS = 80;
 const PAGE_DETAIL_DELAY_MS = 480;
 const SCROLL_PREVIEW_DPR = .65;
 const SEARCH_WHITESPACE = /\s/;
+const MOBILE_MAX_CANVAS_PIXELS = 6_000_000;
+const MOBILE_MAX_MARK_CANVAS_PIXELS = 2_000_000;
+const MOBILE_MAX_SEARCH_CACHE_CHARS = 8_000_000;
+const MOBILE_MAX_SEARCH_CACHE_SPANS = 55_000;
+const MOBILE_MAX_DOM_MARK_RECTS = 48;
+const MOBILE_PAGE_BUILD_BATCH = 32;
+const MOBILE_CARD_OVERSCAN = 3;
+const MOBILE_LONG_PRESS_MS = 560;
+const MOBILE_MARK_RECTS_PER_FRAME = 600;
+const MOBILE_MARK_RECTS_PER_SCROLL_FRAME = 120;
+const MOBILE_MAX_SEARCH_RECTS_PER_PAGE = 180;
+const MOBILE_MAX_SEARCH_RESULT_CARDS = 80;
+
+interface ObsidianMobilePlatformMetrics {
+  mobileDeviceHeight?: number;
+  mobileKeyboardHeight?: number;
+  mobileSoftKeyboardVisible?: boolean;
+}
 
 interface PageState {
   pageNumber: number;
@@ -196,6 +214,7 @@ function markLabel(style: MarkStyle): string {
 }
 
 export class LumenPdfView extends FileView {
+  private readonly mobileRuntime = Platform.isMobile;
   private pdfDocument: PDFDocumentProxy | null = null;
   private pdfWorker: PDFWorker | null = null;
   private workerPort: Worker | null = null;
@@ -219,6 +238,7 @@ export class LumenPdfView extends FileView {
   private readonly queuedPageMounts = new Set<PageState>();
   private activePageMounts = 0;
   private zoom = 1.25;
+  private mobileFitMode = this.mobileRuntime;
   private baselineWidth = 760;
   private baselineHeight = 984;
   private currentPage = 1;
@@ -256,6 +276,20 @@ export class LumenPdfView extends FileView {
   private pageInput!: HTMLInputElement;
   private pageTotal!: HTMLElement;
   private zoomLabel!: HTMLElement;
+  private selectionChangeTimer = 0;
+  private mobileResizeTimer = 0;
+  private longPressTimer = 0;
+  private longPressPointerId: number | null = null;
+  private longPressX = 0;
+  private longPressY = 0;
+  private suppressNextAnnotationClick = false;
+  private ignoreContextMenuUntil = 0;
+  private mobileSuspended = false;
+  private mobileLayoutWidth = 0;
+  private mobileViewportBaselineWidth = 0;
+  private mobileViewportBaselineHeight = 0;
+  private mobileKeyboardProbeTimer = 0;
+  private mobileKeyboardProbeCount = 0;
 
   constructor(
     leaf: WorkspaceLeaf,
@@ -290,6 +324,15 @@ export class LumenPdfView extends FileView {
       this.resetZoom();
       return false;
     });
+    if (this.mobileRuntime) this.scope.register([], "Escape", () => {
+      if (this.editor) this.closeEditor();
+      else if (this.selectionPalette) this.closeSelectionPalette();
+      else if (this.searchPanel?.classList.contains("is-open")) this.toggleSearch();
+      else if (this.inspector?.classList.contains("is-open")) this.toggleInspector();
+      else if (this.pageNotePlacement) this.togglePageNotePlacement();
+      else return true;
+      return false;
+    });
   }
 
   getViewType(): string { return LUMEN_VIEW_TYPE; }
@@ -300,6 +343,34 @@ export class LumenPdfView extends FileView {
   async onOpen(): Promise<void> {
     this.contentEl.empty();
     this.contentEl.addClass("lumen-host");
+    if (!this.mobileRuntime) return;
+    const doc = this.containerEl.ownerDocument;
+    const viewWindow = doc.defaultView;
+    this.registerDomEvent(doc, "selectionchange", () => this.scheduleMobileSelectionCapture());
+    this.registerDomEvent(doc, "visibilitychange", () => this.handleMobileVisibilityChange());
+    this.registerDomEvent(doc, "pointerdown", event => {
+      const target = event.target;
+      if (!(target instanceof Node) || this.rootEl?.contains(target) || this.selectionPalette?.contains(target) || this.editor?.contains(target)) return;
+      this.closeSelectionPalette();
+      this.closeEditor();
+    }, true);
+    this.registerDomEvent(doc, "focusin", () => this.startMobileKeyboardProbe());
+    this.registerDomEvent(doc, "focusout", () => this.startMobileKeyboardProbe());
+    if (viewWindow) this.registerDomEvent(viewWindow, "resize", () => this.scheduleMobileViewportUpdate(40));
+    const viewport = viewWindow?.visualViewport;
+    if (viewport) {
+      const update = () => this.scheduleMobileViewportUpdate(24);
+      viewport.addEventListener("resize", update, { passive: true });
+      viewport.addEventListener("scroll", update, { passive: true });
+      this.register(() => {
+        viewport.removeEventListener("resize", update);
+        viewport.removeEventListener("scroll", update);
+      });
+    }
+  }
+
+  onResize(): void {
+    if (this.mobileRuntime) this.scheduleMobileViewportUpdate();
   }
 
   async onClose(): Promise<void> {
@@ -315,11 +386,11 @@ export class LumenPdfView extends FileView {
     const bundle = await openBundle(this.app.vault, file, bytes, this.automaticPdfBackups);
     if (generation !== this.documentGeneration) return;
     const indexPromise = bundle.repository.load();
-    const loaded = await loadPdf(bytes);
+    const loaded = await loadPdf(bytes, this.mobileRuntime);
     if (generation !== this.documentGeneration) {
       try { await loaded.document?.destroy?.(); } catch { /* a newer document owns the view */ }
       try { await Promise.resolve(loaded.worker?.destroy?.()); } catch { /* already gone */ }
-      loaded.port.terminate();
+      loaded.port?.terminate();
       return;
     }
     this.pdfDocument = loaded.document;
@@ -342,9 +413,11 @@ export class LumenPdfView extends FileView {
 
   toggleSearch(): void {
     const opening = !this.searchPanel.classList.contains("is-open");
+    if (opening && this.mobileRuntime && this.inspector.classList.contains("is-open")) this.toggleInspector();
     this.searchPanel.classList.toggle("is-open", opening);
     if (opening) window.setTimeout(() => this.searchInput.focus(), 0);
     else {
+      if (this.mobileRuntime) this.searchInput.blur();
       this.searchGeneration++;
       this.clearSearchFlashes();
       this.searchInput.value = "";
@@ -354,10 +427,15 @@ export class LumenPdfView extends FileView {
 
   toggleInspector(): void {
     const opening = !this.inspector.classList.contains("is-open");
+    if (opening && this.mobileRuntime && this.searchPanel.classList.contains("is-open")) this.toggleSearch();
     this.inspector.classList.toggle("is-open", opening);
     this.rootEl.classList.toggle("has-inspector", opening);
     if (opening) this.refreshInspector(true);
     else {
+      if (this.mobileRuntime) {
+        const active = this.containerEl.ownerDocument.activeElement;
+        if (active instanceof HTMLElement && this.inspector.contains(active)) active.blur();
+      }
       window.cancelAnimationFrame(this.inspectorRaf);
       this.inspectorList.empty();
       this.inspectorList.scrollTop = 0;
@@ -369,11 +447,29 @@ export class LumenPdfView extends FileView {
   nextPage(): void { this.goToPage(this.currentPage + 1); }
   zoomIn(): void { void this.setZoom(this.zoom + 0.25); }
   zoomOut(): void { void this.setZoom(this.zoom - 0.25); }
-  resetZoom(): void { void this.setZoom(1.25); }
+  resetZoom(): void {
+    if (this.mobileRuntime) {
+      this.mobileFitMode = true;
+      void this.setZoom(this.mobileFitZoom(), true);
+      return;
+    }
+    void this.setZoom(1.25);
+  }
 
   /** Restore lightweight view state without exposing the renderer internals. */
   restorePage(page: number): void { this.goToPage(page); }
-  restoreZoom(zoom: number): Promise<void> { return this.setZoom(zoom); }
+  restoreZoom(zoom: number, mobileFit = false): Promise<void> {
+    if (this.mobileRuntime) {
+      this.mobileFitMode = mobileFit;
+      const target = mobileFit ? this.mobileFitZoom() : zoom;
+      if (Math.abs(target - this.zoom) < .001) return Promise.resolve();
+      return this.setZoom(target, true);
+    }
+    return this.setZoom(zoom);
+  }
+  isMobileView(): boolean { return this.mobileRuntime; }
+  usesMobileFit(): boolean { return this.mobileRuntime && this.mobileFitMode; }
+  minimumZoom(): number { return this.mobileRuntime ? 0.25 : 0.5; }
 
   async revealAnnotation(idOrGroupId: string): Promise<boolean> {
     const members = this.index.inGroup(idOrGroupId);
@@ -413,6 +509,7 @@ export class LumenPdfView extends FileView {
   private buildShell(file: TFile): void {
     this.contentEl.empty();
     this.rootEl = this.contentEl.createDiv({ cls: `lumen-reader theme-${this.theme}` });
+    this.rootEl.classList.toggle("is-mobile", this.mobileRuntime);
     const appAccent = this.getAppAccentColor();
     if (appAccent) this.rootEl.style.setProperty("--lumen-accent", appAccent);
     this.rootEl.style.setProperty("--lumen-zoom", String(this.zoom));
@@ -425,6 +522,12 @@ export class LumenPdfView extends FileView {
     this.buildSearchPanel();
     this.buildInspector();
     this.pagesEl.addEventListener("click", event => {
+      if (this.suppressNextAnnotationClick) {
+        this.suppressNextAnnotationClick = false;
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
       const state = this.pageStateFromEvent(event);
       if (!state) return;
       const mark = event.target instanceof Element ? event.target.closest<HTMLElement>(".lumen-mark") : null;
@@ -444,11 +547,23 @@ export class LumenPdfView extends FileView {
       this.openDenseAnnotationAtPoint(event, state);
     });
     this.pagesEl.addEventListener("contextmenu", event => {
+      if (Date.now() < this.ignoreContextMenuUntil) {
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
+      if (this.mobileRuntime) {
+        this.cancelMobileLongPress();
+      }
       const state = this.pageStateFromEvent(event);
       if (!state) return;
       const mark = event.target instanceof Element ? event.target.closest<HTMLElement>(".lumen-mark") : null;
       const annotation = mark?.dataset.annotationId ? this.index.get(mark.dataset.annotationId) : null;
       if (annotation) {
+        if (this.mobileRuntime) {
+          this.suppressNextAnnotationClick = true;
+          window.setTimeout(() => { this.suppressNextAnnotationClick = false; }, 900);
+        }
         event.preventDefault();
         event.stopPropagation();
         this.showAnnotationMenu(event, annotation);
@@ -456,14 +571,33 @@ export class LumenPdfView extends FileView {
     });
     this.pagesEl.addEventListener("pointerdown", event => {
       if (event.target instanceof Element && event.target.closest(".lumen-mark")) event.stopPropagation();
+      if (this.mobileRuntime) this.beginMobileLongPress(event);
     });
-    this.scrollEl.addEventListener("mouseup", event => {
-      if (this.suppressNextSelectionCapture) {
-        this.suppressNextSelectionCapture = false;
-        return;
-      }
-      this.captureSelection(event);
-    });
+    if (this.mobileRuntime) {
+      this.pagesEl.addEventListener("pointermove", event => this.moveMobileLongPress(event), { passive: true });
+      this.pagesEl.addEventListener("pointerup", event => this.endMobileLongPress(event.pointerId));
+      this.pagesEl.addEventListener("pointercancel", event => this.endMobileLongPress(event.pointerId));
+      this.scrollEl.addEventListener("pointerup", event => {
+        this.endMobileLongPress(event.pointerId);
+        this.scheduleMobileSelectionCapture(event.clientX, event.clientY, 40);
+      }, { passive: true });
+      this.pagesEl.addEventListener("keydown", event => {
+        if (event.key !== "Enter" && event.key !== " ") return;
+        const mark = event.target instanceof Element ? event.target.closest<HTMLElement>(".lumen-mark") : null;
+        const annotation = mark?.dataset.annotationId ? this.index.get(mark.dataset.annotationId) : null;
+        if (!mark || !annotation) return;
+        event.preventDefault();
+        this.openEditor(annotation, mark);
+      });
+    } else {
+      this.scrollEl.addEventListener("mouseup", event => {
+        if (this.suppressNextSelectionCapture) {
+          this.suppressNextSelectionCapture = false;
+          return;
+        }
+        this.captureSelection(event.clientX, event.clientY);
+      });
+    }
     this.scrollEl.addEventListener("scroll", () => {
       this.handleScrollActivity();
       window.cancelAnimationFrame(this.currentPageRaf);
@@ -480,6 +614,10 @@ export class LumenPdfView extends FileView {
       }
       if (this.editor && !this.editor.contains(target) && !(target as Element).closest?.(".lumen-mark")) this.closeEditor();
     });
+    if (this.mobileRuntime) {
+      this.mobileLayoutWidth = this.rootEl.clientWidth;
+      this.updateMobileViewportMetrics();
+    }
   }
 
   private buildToolbar(file: TFile): void {
@@ -550,6 +688,16 @@ export class LumenPdfView extends FileView {
     const inputWrap = this.inspector.createDiv({ cls: "lumen-search-input-wrap" });
     setIcon(inputWrap.createSpan(), "search");
     this.inspectorQuery = inputWrap.createEl("input", { attr: { type: "search", placeholder: "Search annotations", "aria-label": "Search annotations" } });
+    if (this.mobileRuntime) {
+      this.inspectorQuery.addEventListener("focus", () => this.inspector.addClass("is-mobile-querying"));
+      this.inspectorQuery.addEventListener("blur", () => {
+        window.setTimeout(() => {
+          if (this.containerEl.ownerDocument.activeElement !== this.inspectorQuery) {
+            this.inspector.removeClass("is-mobile-querying");
+          }
+        }, 120);
+      });
+    }
     let queryTimer = 0;
     this.inspectorQuery.addEventListener("input", () => {
       window.clearTimeout(queryTimer);
@@ -607,6 +755,11 @@ export class LumenPdfView extends FileView {
     const firstViewport = first.getViewport({ scale: 1 });
     this.baselineWidth = firstViewport.width;
     this.baselineHeight = firstViewport.height;
+    if (this.mobileRuntime && this.mobileFitMode) {
+      this.zoom = this.mobileFitZoom();
+      this.rootEl.style.setProperty("--lumen-zoom", String(this.zoom));
+      this.zoomLabel.textContent = `${Math.round(this.zoom * 100)}%`;
+    }
     this.pagesEl.style.setProperty("--lumen-page-width", `${this.baselineWidth}px`);
     this.pagesEl.style.setProperty("--lumen-page-height", `${this.baselineHeight}px`);
     const pageCount = this.pdfDocument.numPages;
@@ -632,8 +785,9 @@ export class LumenPdfView extends FileView {
         }
       }
       this.pumpPageMounts();
-    }, { root: this.scrollEl, rootMargin: "360px 0px 360px", threshold: [0.01, 0.5] });
+    }, { root: this.scrollEl, rootMargin: this.mobileRuntime ? "180px 0px 180px" : "360px 0px 360px", threshold: [0.01, 0.5] });
 
+    const pageBatchSize = this.mobileRuntime ? MOBILE_PAGE_BUILD_BATCH : PAGE_BUILD_BATCH;
     let fragment = createFragment();
     const batch: HTMLElement[] = [];
     for (let pageNumber = 1; pageNumber <= pageCount; pageNumber++) {
@@ -649,7 +803,7 @@ export class LumenPdfView extends FileView {
       this.pages.set(pageNumber, state);
       fragment.append(shell);
       batch.push(shell);
-      if (batch.length >= PAGE_BUILD_BATCH || pageNumber === pageCount) {
+      if (batch.length >= pageBatchSize || pageNumber === pageCount) {
         this.pagesEl.append(fragment);
         for (const page of batch) this.observer.observe(page);
         fragment = createFragment();
@@ -705,7 +859,7 @@ export class LumenPdfView extends FileView {
   }
 
   private pageNeedsCanvasWork(state: PageState): boolean {
-    if (this.isScrolling || performance.now() < this.pagePreviewReadyAt) return false;
+    if (this.mobileSuspended || this.isScrolling || performance.now() < this.pagePreviewReadyAt) return false;
     return !state.canvasReady
       || (!this.isScrolling && performance.now() >= this.pageDetailReadyAt && !state.canvasDetailReady);
   }
@@ -746,7 +900,7 @@ export class LumenPdfView extends FileView {
   }
 
   private async mountPage(state: PageState, force = false): Promise<void> {
-    if (!this.pdfDocument || state.rendering || (!force && !state.wanted)) return;
+    if (!this.pdfDocument || this.mobileSuspended || state.rendering || (!force && !state.wanted)) return;
     if (!force && !this.pageNeedsCanvasWork(state)) {
       if (!this.isScrolling) this.scheduleTextLayer(state);
       return;
@@ -763,7 +917,7 @@ export class LumenPdfView extends FileView {
     const generation = ++state.renderGeneration;
     try {
       const page = state.page ?? await this.pdfDocument.getPage(state.pageNumber);
-      if (!state.mounted || generation !== state.renderGeneration || (!force && !state.wanted)) return;
+      if (this.mobileSuspended || !state.mounted || generation !== state.renderGeneration || (!force && !state.wanted)) return;
       state.page = page;
       if (!force && !this.pageNeedsCanvasWork(state)) return;
       const cssViewport = page.getViewport({ scale: this.zoom });
@@ -772,7 +926,8 @@ export class LumenPdfView extends FileView {
       const deviceDpr = Math.max(1, window.devicePixelRatio || 1);
       const requestedDpr = fullDetail ? deviceDpr : Math.min(deviceDpr, SCROLL_PREVIEW_DPR);
       const desiredPixels = cssViewport.width * cssViewport.height * requestedDpr * requestedDpr;
-      const pixelFactor = desiredPixels > MAX_CANVAS_PIXELS ? Math.sqrt(MAX_CANVAS_PIXELS / desiredPixels) : 1;
+      const canvasPixelLimit = this.mobileRuntime ? MOBILE_MAX_CANVAS_PIXELS : MAX_CANVAS_PIXELS;
+      const pixelFactor = desiredPixels > canvasPixelLimit ? Math.sqrt(canvasPixelLimit / desiredPixels) : 1;
       const targetPixelRatio = requestedDpr * pixelFactor;
       if (state.canvasReady && state.renderedPixelRatio >= targetPixelRatio * .98) {
         state.canvasDetailReady ||= fullDetail;
@@ -832,7 +987,7 @@ export class LumenPdfView extends FileView {
   }
 
   private scheduleTextLayer(state: PageState): void {
-    if (this.isScrolling || !state.wanted || !state.mounted || !state.canvasReady || state.textReady || state.textRendering || state.textTimer) return;
+    if (this.mobileSuspended || this.isScrolling || !state.wanted || !state.mounted || !state.canvasReady || state.textReady || state.textRendering || state.textTimer) return;
     if (!this.isPageActuallyVisible(state)) return;
     const remainingDetailDelay = Math.max(0, this.pageDetailReadyAt - performance.now());
     state.textTimer = window.setTimeout(() => {
@@ -848,7 +1003,7 @@ export class LumenPdfView extends FileView {
   }
 
   private async renderTextLayer(state: PageState): Promise<void> {
-    if (this.isScrolling || !state.wanted || !state.mounted || !state.page || !state.textHost || state.textReady || state.textRendering) return;
+    if (this.mobileSuspended || this.isScrolling || !state.wanted || !state.mounted || !state.page || !state.textHost || state.textReady || state.textRendering) return;
     const generation = ++state.textGeneration;
     state.textRendering = true;
     const textHost = state.textHost;
@@ -962,8 +1117,10 @@ export class LumenPdfView extends FileView {
     this.mountedPages.delete(state);
   }
 
-  private async setZoom(value: number): Promise<void> {
-    this.zoom = clamp(Math.round(value * 4) / 4, 0.5, 4);
+  private async setZoom(value: number, preserveMobileFit = false): Promise<void> {
+    if (this.mobileRuntime && !preserveMobileFit) this.mobileFitMode = false;
+    const rounded = this.mobileRuntime ? Math.round(value * 20) / 20 : Math.round(value * 4) / 4;
+    this.zoom = clamp(rounded, this.minimumZoom(), 4);
     this.rootEl.style.setProperty("--lumen-zoom", String(this.zoom));
     this.zoomLabel.textContent = `${Math.round(this.zoom * 100)}%`;
     for (const state of Array.from(this.mountedPages)) {
@@ -1010,12 +1167,221 @@ export class LumenPdfView extends FileView {
     if (appAccent) surface.style.setProperty("--lumen-accent", appAccent);
   }
 
+  private detachedDocument(): Document {
+    return this.mobileRuntime ? this.containerEl.ownerDocument : document;
+  }
+
+  private prepareDetachedSurface(surface: HTMLElement): void {
+    this.syncDetachedTheme(surface);
+    if (!this.mobileRuntime) return;
+    surface.addClass("is-mobile-surface");
+    this.updateDetachedMobileSurface(surface);
+  }
+
+  private updateDetachedMobileSurface(surface: HTMLElement): void {
+    for (const property of [
+      "--lumen-mobile-viewport-top",
+      "--lumen-mobile-viewport-center",
+      "--lumen-mobile-viewport-height",
+      "--lumen-mobile-keyboard-offset",
+      "--lumen-mobile-keyboard-extra-height",
+    ]) {
+      const value = this.rootEl?.style.getPropertyValue(property);
+      if (value) surface.style.setProperty(property, value);
+    }
+    surface.classList.toggle("has-mobile-keyboard", this.rootEl?.classList.contains("has-mobile-keyboard") ?? false);
+  }
+
+  private startMobileKeyboardProbe(): void {
+    if (!this.mobileRuntime) return;
+    window.clearTimeout(this.mobileKeyboardProbeTimer);
+    this.mobileKeyboardProbeCount = 0;
+    const probe = () => {
+      this.mobileKeyboardProbeTimer = 0;
+      this.updateMobileViewportMetrics();
+      if (++this.mobileKeyboardProbeCount >= 12) return;
+      this.mobileKeyboardProbeTimer = window.setTimeout(probe, 60);
+    };
+    probe();
+  }
+
+  private scheduleMobileViewportUpdate(delay = 72): void {
+    if (!this.mobileRuntime) return;
+    window.clearTimeout(this.mobileResizeTimer);
+    this.mobileResizeTimer = window.setTimeout(() => {
+      this.mobileResizeTimer = 0;
+      const width = this.rootEl?.clientWidth ?? 0;
+      const layoutWidthChanged = this.mobileLayoutWidth > 0 && width > 0
+        && Math.abs(width - this.mobileLayoutWidth) >= 48;
+      if (width > 0) this.mobileLayoutWidth = width;
+      this.updateMobileViewportMetrics();
+      // Opening the software keyboard fires resize events in mobile WebViews.
+      // Re-rendering a fitted PDF during that animation causes the document to
+      // jump or temporarily disappear, so only refit after a real width change
+      // such as rotation or split-view resizing.
+      if (!layoutWidthChanged || !this.mobileFitMode || !this.pdfDocument) return;
+      const fit = this.mobileFitZoom();
+      if (Math.abs(fit - this.zoom) >= .01) void this.setZoom(fit, true);
+    }, delay);
+  }
+
+  private updateMobileViewportMetrics(): void {
+    if (!this.mobileRuntime || !this.rootEl?.isConnected) return;
+    const doc = this.containerEl.ownerDocument;
+    const viewWindow = doc.defaultView;
+    const viewport = viewWindow?.visualViewport;
+    const viewportWidth = viewport?.width ?? viewWindow?.innerWidth ?? this.rootEl.clientWidth;
+    const reportedViewportHeight = viewport?.height ?? viewWindow?.innerHeight ?? this.rootEl.clientHeight;
+    const viewportTop = viewport?.offsetTop ?? 0;
+    if (!this.mobileViewportBaselineWidth
+      || Math.abs(viewportWidth - this.mobileViewportBaselineWidth) >= 80) {
+      this.mobileViewportBaselineWidth = viewportWidth;
+      this.mobileViewportBaselineHeight = reportedViewportHeight;
+    } else {
+      this.mobileViewportBaselineHeight = Math.max(this.mobileViewportBaselineHeight, reportedViewportHeight);
+    }
+    const active = doc.activeElement;
+    const editing = active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement || active instanceof HTMLSelectElement;
+    const platformMetrics = Platform as typeof Platform & ObsidianMobilePlatformMetrics;
+    const nativeKeyboardVisible = platformMetrics.mobileSoftKeyboardVisible === true;
+    const nativeDeviceHeight = Number(platformMetrics.mobileDeviceHeight) || 0;
+    const nativeKeyboardHeight = Number(platformMetrics.mobileKeyboardHeight) || 0;
+    const viewportReduced = this.mobileViewportBaselineHeight - reportedViewportHeight >= 80;
+    const keyboardOpen = editing || nativeKeyboardVisible || (viewportReduced
+      && this.rootEl.classList.contains("has-mobile-keyboard"));
+    let viewportHeight = reportedViewportHeight;
+    const nativeVisibleHeight = nativeDeviceHeight - nativeKeyboardHeight;
+    const nativeMetricsUsable = nativeKeyboardVisible
+      && nativeKeyboardHeight > 80
+      && nativeVisibleHeight >= 180
+      && nativeDeviceHeight <= Math.max(this.mobileViewportBaselineHeight, reportedViewportHeight) * 1.6;
+    if (nativeMetricsUsable) viewportHeight = Math.min(viewportHeight, nativeVisibleHeight);
+    else if (nativeKeyboardVisible && !viewportReduced) {
+      // Older mobile shells expose only the keyboard-visible flag. Reserve a
+      // conservative keyboard region instead of allowing fixed panels to sit
+      // underneath an overlaying native keyboard.
+      viewportHeight = Math.min(viewportHeight, Math.max(220, this.mobileViewportBaselineHeight * .56));
+    }
+    const rootRect = this.rootEl.getBoundingClientRect();
+    const rootViewportTop = Math.max(0, viewportTop - rootRect.top);
+    const layoutHeight = Math.max(viewWindow?.innerHeight ?? 0, doc.documentElement.clientHeight, rootRect.bottom);
+    const keyboardOffset = keyboardOpen ? Math.max(0, layoutHeight - viewportTop - viewportHeight) : 0;
+    // Some Android WebViews resize the Obsidian leaf itself to the visible
+    // keyboard viewport. Keep the reader surface full-height in that case so
+    // the PDF does not expose the app's black body background beneath it.
+    // When the host already remains full-height (overlay keyboards), this is
+    // zero and the existing geometry is untouched.
+    const previousKeyboardExtra = Number.parseFloat(
+      this.rootEl.style.getPropertyValue("--lumen-mobile-keyboard-extra-height"),
+    ) || 0;
+    const hostCollapsedForKeyboard = keyboardOpen && (previousKeyboardExtra > 0 || (rootRect.height > 0
+      && layoutHeight - rootRect.height >= 100));
+    const keyboardExtraHeight = hostCollapsedForKeyboard ? keyboardOffset : 0;
+    const viewportCenter = viewportTop + viewportHeight / 2;
+    this.rootEl.classList.toggle("has-mobile-keyboard", keyboardOpen);
+    this.rootEl.style.setProperty("--lumen-mobile-viewport-top", `${Math.round(viewportTop)}px`);
+    this.rootEl.style.setProperty("--lumen-mobile-root-viewport-top", `${Math.round(rootViewportTop)}px`);
+    this.rootEl.style.setProperty("--lumen-mobile-viewport-center", `${Math.round(viewportCenter)}px`);
+    this.rootEl.style.setProperty("--lumen-mobile-viewport-height", `${Math.round(viewportHeight)}px`);
+    this.rootEl.style.setProperty("--lumen-mobile-keyboard-offset", `${Math.round(keyboardOffset)}px`);
+    this.rootEl.style.setProperty("--lumen-mobile-keyboard-extra-height", `${Math.round(keyboardExtraHeight)}px`);
+    this.updateDetachedMobileSurface(this.selectionPalette ?? this.editor ?? this.rootEl);
+    if (this.selectionPalette && this.editor) this.updateDetachedMobileSurface(this.editor);
+    this.editor?.classList.toggle("has-mobile-keyboard", keyboardOpen);
+    window.requestAnimationFrame(() => this.ensureMobileFocusedControlVisible());
+  }
+
+  private ensureMobileFocusedControlVisible(): void {
+    if (!this.mobileRuntime) return;
+    const doc = this.containerEl.ownerDocument;
+    const active = doc.activeElement;
+    if (!(active instanceof HTMLElement)) return;
+    const scroller = active.closest<HTMLElement>(".lumen-mark-editor.is-mobile-surface, .lumen-inspector-detail");
+    if (!scroller) return;
+    const controlRect = active.getBoundingClientRect();
+    const scrollerRect = scroller.getBoundingClientRect();
+    const topLimit = scrollerRect.top + 12;
+    const bottomLimit = scrollerRect.bottom - 12;
+    if (controlRect.bottom > bottomLimit) scroller.scrollTop += controlRect.bottom - bottomLimit;
+    else if (controlRect.top < topLimit) scroller.scrollTop -= topLimit - controlRect.top;
+  }
+
+  private mobileFitZoom(): number {
+    if (!this.mobileRuntime || !this.baselineWidth) return 1.25;
+    const scrollWidth = this.scrollEl?.clientWidth || this.rootEl?.clientWidth || this.contentEl.clientWidth || 320;
+    const scrollStyle = this.scrollEl ? getComputedStyle(this.scrollEl) : null;
+    const horizontalPadding = (Number.parseFloat(scrollStyle?.paddingLeft ?? "0") || 0)
+      + (Number.parseFloat(scrollStyle?.paddingRight ?? "0") || 0);
+    const availableWidth = Math.max(220, scrollWidth - horizontalPadding);
+    return clamp(Math.floor((availableWidth / this.baselineWidth) * 20) / 20, this.minimumZoom(), 2);
+  }
+
+  private handleMobileVisibilityChange(): void {
+    if (!this.mobileRuntime) return;
+    const hidden = this.containerEl.ownerDocument.visibilityState === "hidden";
+    if (hidden) {
+      this.mobileSuspended = true;
+      this.searchGeneration++;
+      window.clearTimeout(this.selectionChangeTimer);
+      this.selectionChangeTimer = 0;
+      this.cancelMobileLongPress();
+      for (const state of this.mountedPages) {
+        this.cancelPageRender(state);
+        this.cancelPendingTextLayer(state);
+      }
+      if (this.bundle) void this.bundle.repository.flushJournal().catch(error => {
+        console.error("Lumen could not flush annotations while the mobile app was backgrounded", error);
+      });
+      return;
+    }
+    this.mobileSuspended = false;
+    this.updateMobileViewportMetrics();
+    this.pagePreviewReadyAt = 0;
+    this.pageDetailReadyAt = performance.now() + PAGE_DETAIL_DELAY_MS;
+    window.clearTimeout(this.pageDetailTimer);
+    this.pageDetailTimer = window.setTimeout(() => this.finishPageDetails(), PAGE_DETAIL_DELAY_MS);
+    for (const state of this.pages.values()) if (state.wanted) this.schedulePageMount(state);
+    this.pumpPageMounts();
+    if (this.searchPanel?.classList.contains("is-open") && this.searchInput.value.trim().length >= 2) {
+      void this.runSearch(this.searchInput.value);
+    }
+  }
+
+  private async writeClipboard(value: string): Promise<void> {
+    if (!this.mobileRuntime) {
+      await navigator.clipboard.writeText(value);
+      return;
+    }
+    const doc = this.detachedDocument();
+    const clipboard = doc.defaultView?.navigator.clipboard ?? navigator.clipboard;
+    try {
+      if (!clipboard?.writeText) throw new Error("Clipboard API unavailable");
+      await clipboard.writeText(value);
+      return;
+    } catch (clipboardError) {
+      const input = doc.body.createEl("textarea", { attr: { "aria-hidden": "true" } });
+      input.value = value;
+      input.addClass("lumen-clipboard-proxy");
+      input.select();
+      input.setSelectionRange(0, input.value.length);
+      // execCommand remains the only synchronous copy fallback in older
+      // Capacitor WebViews when the modern Clipboard API is unavailable.
+      const legacyCopy: unknown = Reflect.get(doc, "execCommand");
+      const copied = typeof legacyCopy === "function" && Boolean(legacyCopy.call(doc, "copy"));
+      input.remove();
+      if (!copied) throw clipboardError;
+    }
+  }
+
   private getAppAccentColor(): string {
     // Reading a custom property returns its unresolved var() expression. Resolve
     // it on a neutral probe before PDF theme classes can replace its HSL inputs.
-    const probe = document.body.createSpan({ cls: "lumen-accent-probe" });
+    const doc = this.mobileRuntime ? this.containerEl.ownerDocument : document;
+    const probe = doc.body.createSpan({ cls: "lumen-accent-probe" });
     probe.setCssProps({ color: "var(--interactive-accent)" });
-    const accent = getComputedStyle(probe).color;
+    const accent = this.mobileRuntime
+      ? doc.defaultView?.getComputedStyle(probe).color ?? ""
+      : getComputedStyle(probe).color;
     probe.remove();
     return accent;
   }
@@ -1109,10 +1475,13 @@ export class LumenPdfView extends FileView {
     this.scrollEl.scrollTo({ top: Math.max(0, targetTop), behavior: "smooth" });
   }
 
-  private captureSelection(event: MouseEvent): void {
-    const nativeSelection = window.getSelection();
+  private captureSelection(clientX?: number, clientY?: number): void {
+    const nativeSelection = this.mobileRuntime
+      ? this.containerEl.ownerDocument.defaultView?.getSelection() ?? null
+      : window.getSelection();
     if (!nativeSelection || nativeSelection.isCollapsed || !nativeSelection.rangeCount) return;
     const range = nativeSelection.getRangeAt(0).cloneRange();
+    if (this.mobileRuntime && !this.selectionRangeBelongsToReader(range)) return;
     const quote = range.toString().replace(/\s+/g, " ").trim();
     if (!quote) return;
     // PDF.js can represent punctuation and narrow glyphs as sub-pixel or even
@@ -1150,9 +1519,45 @@ export class LumenPdfView extends FileView {
       if (normalized.length) byPage.set(state.pageNumber, this.coalesceSelectionRects(normalized));
     }
     if (!byPage.size) return;
-    this.selection = { quote, pages: byPage, x: event.clientX, y: event.clientY };
+    const selectionBounds = range.getBoundingClientRect();
+    const x = Number.isFinite(clientX) ? clientX! : selectionBounds.left + selectionBounds.width / 2;
+    const y = Number.isFinite(clientY) ? clientY! : selectionBounds.bottom;
+    this.selection = { quote, pages: byPage, x, y };
     if (this.extensionGroupId) this.showExtensionPalette();
     else this.showSelectionPalette();
+  }
+
+  private selectionRangeBelongsToReader(range: Range): boolean {
+    const start = range.startContainer.instanceOf(Element) ? range.startContainer : range.startContainer.parentElement;
+    const end = range.endContainer.instanceOf(Element) ? range.endContainer : range.endContainer.parentElement;
+    return Boolean(start && end
+      && this.pagesEl.contains(start)
+      && this.pagesEl.contains(end)
+      && start.closest(".lumen-text-layer")
+      && end.closest(".lumen-text-layer"));
+  }
+
+  private scheduleMobileSelectionCapture(clientX?: number, clientY?: number, delay = 170): void {
+    if (!this.mobileRuntime || !this.rootEl?.isConnected) return;
+    window.clearTimeout(this.selectionChangeTimer);
+    this.selectionChangeTimer = window.setTimeout(() => {
+      this.selectionChangeTimer = 0;
+      if (this.suppressNextSelectionCapture) {
+        this.suppressNextSelectionCapture = false;
+        return;
+      }
+      const selection = this.containerEl.ownerDocument.defaultView?.getSelection();
+      if (!selection || selection.isCollapsed || !selection.rangeCount) {
+        // Tapping a palette control can collapse the native text selection on
+        // iOS. Keep the already captured geometry until the user applies a
+        // style or taps outside the palette.
+        if (!this.selectionPalette) this.selection = null;
+        return;
+      }
+      const quote = selection.getRangeAt(0).toString().replace(/\s+/g, " ").trim();
+      if (this.selectionPalette && quote && quote === this.selection?.quote) return;
+      this.captureSelection(clientX, clientY);
+    }, delay);
   }
 
   private coalesceSelectionRects(rects: NormalizedRect[]): NormalizedRect[] {
@@ -1234,8 +1639,12 @@ export class LumenPdfView extends FileView {
     const pendingSelection = this.selection;
     this.selectionPalette?.remove();
     this.selectionPalette = null;
-    const palette = document.body.createDiv({ cls: "lumen-selection-palette" });
-    this.syncDetachedTheme(palette);
+    const palette = this.detachedDocument().body.createDiv({ cls: "lumen-selection-palette" });
+    this.prepareDetachedSurface(palette);
+    if (this.mobileRuntime) {
+      palette.setAttribute("role", "toolbar");
+      palette.setAttribute("aria-label", "PDF annotation tools");
+    }
     this.selectionPalette = palette;
     let pendingColor: string = MARK_COLORS[0];
     const colorChips: HTMLButtonElement[] = [];
@@ -1265,9 +1674,10 @@ export class LumenPdfView extends FileView {
     }
     const actions = palette.createDiv({ cls: "lumen-palette-actions" });
     actions.append(iconButton("copy", "Copy selected text", () => {
-      void navigator.clipboard.writeText(pendingSelection.quote);
+      void this.writeClipboard(pendingSelection.quote);
       this.closeSelectionPalette();
     }));
+    if (this.mobileRuntime) return;
     const width = palette.offsetWidth || 390;
     palette.style.left = `${clamp(pendingSelection.x - width / 2, 12, window.innerWidth - width - 12)}px`;
     palette.style.top = `${clamp(pendingSelection.y + 12, 12, window.innerHeight - 96)}px`;
@@ -1277,8 +1687,12 @@ export class LumenPdfView extends FileView {
     if (!this.selection || !this.extensionGroupId) return;
     const pendingSelection = this.selection;
     this.selectionPalette?.remove();
-    const palette = document.body.createDiv({ cls: "lumen-selection-palette lumen-extension-palette" });
-    this.syncDetachedTheme(palette);
+    const palette = this.detachedDocument().body.createDiv({ cls: "lumen-selection-palette lumen-extension-palette" });
+    this.prepareDetachedSurface(palette);
+    if (this.mobileRuntime) {
+      palette.setAttribute("role", "dialog");
+      palette.setAttribute("aria-label", "Extend annotation");
+    }
     this.selectionPalette = palette;
     const controls = palette.createDiv({ cls: "lumen-extension-controls" });
     controls.createSpan({ cls: "lumen-extension-label", text: "Extend annotation" });
@@ -1290,6 +1704,7 @@ export class LumenPdfView extends FileView {
       text: pendingSelection.quote,
       attr: { "aria-label": "Selected text preview", role: "status" },
     });
+    if (this.mobileRuntime) return;
     const width = palette.offsetWidth || 320;
     const height = palette.offsetHeight || 88;
     const below = pendingSelection.y + 12;
@@ -1386,7 +1801,8 @@ export class LumenPdfView extends FileView {
       this.renderMarks(page);
       first ??= annotation;
     }
-    window.getSelection()?.removeAllRanges();
+    if (this.mobileRuntime) this.containerEl.ownerDocument.defaultView?.getSelection()?.removeAllRanges();
+    else window.getSelection()?.removeAllRanges();
     this.closeSelectionPalette();
     this.refreshInspector();
     if (openEditor && first) {
@@ -1407,12 +1823,14 @@ export class LumenPdfView extends FileView {
     markHost.empty();
     const annotations = this.index.onPage(pageNumber);
     const rectCount = annotations.reduce((total, annotation) => total + annotation.rects.length, 0);
-    if (rectCount > MAX_DOM_MARK_RECTS) {
+    const domMarkLimit = this.mobileRuntime ? MOBILE_MAX_DOM_MARK_RECTS : MAX_DOM_MARK_RECTS;
+    if (rectCount > domMarkLimit) {
       this.renderDenseMarks(state, annotations, state.markGeneration);
       return;
     }
     for (const annotation of annotations) {
-      for (const rect of annotation.rects) {
+      for (let rectIndex = 0; rectIndex < annotation.rects.length; rectIndex++) {
+        const rect = annotation.rects[rectIndex];
         const mark = markHost.createDiv({ cls: `lumen-mark style-${annotation.style}` });
         if (annotation.kind === "page-note") {
           mark.addClass("is-page-note");
@@ -1420,6 +1838,13 @@ export class LumenPdfView extends FileView {
           setIcon(mark, "sticky-note");
         }
         mark.dataset.annotationId = annotation.id;
+        if (this.mobileRuntime) {
+          if (rectIndex === 0) {
+            mark.tabIndex = 0;
+            mark.setAttribute("role", "button");
+            mark.setAttribute("aria-label", `${annotation.kind === "page-note" ? "Page note" : markLabel(annotation.style)} on page ${annotation.page}`);
+          } else mark.setAttribute("aria-hidden", "true");
+        }
         mark.style.setProperty("--mark-color", annotation.color);
         mark.style.left = `${rect.x * 100}%`;
         mark.style.top = `${rect.y * 100}%`;
@@ -1436,7 +1861,8 @@ export class LumenPdfView extends FileView {
     const canvas = state.markHost.createEl("canvas", { cls: "lumen-dense-mark-canvas" });
     const dpr = Math.max(1, window.devicePixelRatio || 1);
     const desiredPixels = width * height * dpr * dpr;
-    const factor = desiredPixels > MAX_MARK_CANVAS_PIXELS ? Math.sqrt(MAX_MARK_CANVAS_PIXELS / desiredPixels) : 1;
+    const markCanvasPixelLimit = this.mobileRuntime ? MOBILE_MAX_MARK_CANVAS_PIXELS : MAX_MARK_CANVAS_PIXELS;
+    const factor = desiredPixels > markCanvasPixelLimit ? Math.sqrt(markCanvasPixelLimit / desiredPixels) : 1;
     canvas.width = Math.max(1, Math.floor(width * dpr * factor));
     canvas.height = Math.max(1, Math.floor(height * dpr * factor));
     canvas.style.width = `${width}px`;
@@ -1454,7 +1880,9 @@ export class LumenPdfView extends FileView {
     const drawChunk = () => {
       if (!state.mounted || generation !== state.markGeneration) return;
       let drawn = 0;
-      const frameBudget = this.isScrolling ? MARK_RECTS_PER_SCROLL_FRAME : MARK_RECTS_PER_FRAME;
+      const frameBudget = this.mobileRuntime
+        ? (this.isScrolling ? MOBILE_MARK_RECTS_PER_SCROLL_FRAME : MOBILE_MARK_RECTS_PER_FRAME)
+        : (this.isScrolling ? MARK_RECTS_PER_SCROLL_FRAME : MARK_RECTS_PER_FRAME);
       while (annotationIndex < annotations.length && drawn < frameBudget) {
         const annotation = annotations[annotationIndex];
         while (rectIndex < annotation.rects.length && drawn < frameBudget) {
@@ -1579,7 +2007,9 @@ export class LumenPdfView extends FileView {
   private denseAnnotationAtPoint(event: MouseEvent, state: PageState): PdfAnnotation | null {
     const grid = state.markHitGrid;
     if (!grid || !state.mounted || !state.stage) return null;
-    const selection = window.getSelection();
+    const selection = this.mobileRuntime
+      ? this.containerEl.ownerDocument.defaultView?.getSelection()
+      : window.getSelection();
     if (selection && !selection.isCollapsed) return null;
     const bounds = state.stage.getBoundingClientRect();
     const x = clamp((event.clientX - bounds.left) / Math.max(1, bounds.width), 0, 1);
@@ -1606,19 +2036,70 @@ export class LumenPdfView extends FileView {
   }
 
   private showAnnotationMenu(event: MouseEvent, annotation: PdfAnnotation): void {
+    this.annotationMenu(annotation).showAtMouseEvent(event);
+  }
+
+  private annotationMenu(annotation: PdfAnnotation): Menu {
     const menu = new Menu();
     menu.addItem(item => item
       .setTitle(annotation.kind === "page-note" ? "Copy link to annotation" : "Copy link to highlight")
       .setIcon("link")
       .onClick(() => void this.copyAnnotationLink(annotation)));
-    menu.showAtMouseEvent(event);
+    if (this.mobileRuntime) {
+      menu.addItem(item => item
+        .setTitle("Edit annotation")
+        .setIcon("pencil")
+        .onClick(() => {
+          const state = this.pages.get(annotation.page);
+          if (state) this.openEditorAtRect(annotation, this.annotationClientRect(annotation, state));
+        }));
+    }
+    return menu;
+  }
+
+  private beginMobileLongPress(event: PointerEvent): void {
+    this.cancelMobileLongPress();
+    if (!event.isPrimary || event.pointerType === "mouse" || event.button !== 0) return;
+    const state = this.pageStateFromEvent(event);
+    if (!state) return;
+    const mark = event.target instanceof Element ? event.target.closest<HTMLElement>(".lumen-mark") : null;
+    const annotation = mark?.dataset.annotationId
+      ? this.index.get(mark.dataset.annotationId)
+      : this.denseAnnotationAtPoint(event, state);
+    if (!annotation) return;
+    this.longPressPointerId = event.pointerId;
+    this.longPressX = event.clientX;
+    this.longPressY = event.clientY;
+    this.longPressTimer = window.setTimeout(() => {
+      this.longPressTimer = 0;
+      this.longPressPointerId = null;
+      this.suppressNextAnnotationClick = true;
+      this.ignoreContextMenuUntil = Date.now() + 900;
+      this.annotationMenu(annotation).showAtPosition({ x: this.longPressX, y: this.longPressY }, this.containerEl.ownerDocument);
+      window.setTimeout(() => { this.suppressNextAnnotationClick = false; }, 900);
+    }, MOBILE_LONG_PRESS_MS);
+  }
+
+  private moveMobileLongPress(event: PointerEvent): void {
+    if (event.pointerId !== this.longPressPointerId) return;
+    if (Math.hypot(event.clientX - this.longPressX, event.clientY - this.longPressY) > 10) this.cancelMobileLongPress();
+  }
+
+  private endMobileLongPress(pointerId: number): void {
+    if (pointerId === this.longPressPointerId) this.cancelMobileLongPress();
+  }
+
+  private cancelMobileLongPress(): void {
+    if (this.longPressTimer) window.clearTimeout(this.longPressTimer);
+    this.longPressTimer = 0;
+    this.longPressPointerId = null;
   }
 
   private async copyAnnotationLink(annotation: PdfAnnotation): Promise<void> {
     if (!this.file) return;
     const link = annotationMarkdownLink(this.app.vault.getName(), this.file.path, annotation);
     try {
-      await navigator.clipboard.writeText(link);
+      await this.writeClipboard(link);
       new Notice(annotation.kind === "page-note" ? "Annotation link copied." : "Highlight link copied.");
     } catch (error) {
       console.error("Lumen could not copy an annotation link", error);
@@ -1645,13 +2126,22 @@ export class LumenPdfView extends FileView {
     if (this.extensionGroupId) this.finishExtension();
     this.closeSelectionPalette();
     this.closeEditor();
-    const editor = document.body.createDiv({ cls: `lumen-mark-editor theme-${this.theme}` });
-    this.syncDetachedTheme(editor);
+    const editor = this.detachedDocument().body.createDiv({ cls: `lumen-mark-editor theme-${this.theme}` });
+    this.prepareDetachedSurface(editor);
+    if (this.mobileRuntime) {
+      editor.setAttribute("role", "dialog");
+      editor.setAttribute("aria-label", `Edit annotation on page ${annotation.page}`);
+      editor.tabIndex = -1;
+    }
     this.editor = editor;
     const heading = editor.createDiv({ cls: "lumen-editor-heading" });
     heading.createSpan({ text: this.annotationPageLabel(annotation, "Page ") });
     heading.append(iconButton("x", "Close editor", () => this.closeEditor()));
     this.populateEditor(editor, annotation, true);
+    if (this.mobileRuntime) {
+      window.setTimeout(() => editor.focus({ preventScroll: true }), 0);
+      return;
+    }
     const width = 330;
     editor.style.left = `${clamp(rect.left, 12, window.innerWidth - width - 12)}px`;
     editor.style.top = `${clamp(rect.bottom + 10, 12, window.innerHeight - 410)}px`;
@@ -1693,7 +2183,7 @@ export class LumenPdfView extends FileView {
     note.addEventListener("input", save);
     tags.addEventListener("input", save);
     const actions = container.createDiv({ cls: "lumen-editor-actions" });
-    actions.append(iconButton("copy", "Copy quoted text", () => void navigator.clipboard.writeText(annotation.quote)));
+    actions.append(iconButton("copy", "Copy quoted text", () => void this.writeClipboard(annotation.quote)));
     if (annotation.kind !== "page-note") {
       actions.append(iconButton("scan-text", "Extend annotation", () => this.beginExtension(annotation)));
     }
@@ -1819,8 +2309,9 @@ export class LumenPdfView extends FileView {
     const anchor = logicalHeight <= virtualHeight
       ? Math.floor(scrollTop / CARD_HEIGHT)
       : Math.round((scrollTop / scrollRange) * maxAnchor);
-    const start = Math.max(0, anchor - CARD_OVERSCAN);
-    const end = Math.min(itemCount, anchor + visibleCount + CARD_OVERSCAN);
+    const cardOverscan = this.mobileRuntime ? MOBILE_CARD_OVERSCAN : CARD_OVERSCAN;
+    const start = Math.max(0, anchor - cardOverscan);
+    const end = Math.min(itemCount, anchor + visibleCount + cardOverscan);
     const windowItems = directWindow
       ? this.index.logicalSlice(start, end, this.inspectorSort === "newest")
       : filteredItems?.slice(start, end) ?? [];
@@ -1830,11 +2321,16 @@ export class LumenPdfView extends FileView {
     const windowHeight = (end - start) * CARD_HEIGHT;
     const windowTop = logicalHeight <= virtualHeight
       ? start * CARD_HEIGHT
-      : clamp(scrollTop - CARD_OVERSCAN * CARD_HEIGHT, 0, Math.max(0, virtualHeight - windowHeight));
+      : clamp(scrollTop - cardOverscan * CARD_HEIGHT, 0, Math.max(0, virtualHeight - windowHeight));
     window.style.transform = `translateY(${windowTop}px)`;
     for (let offset = 0; offset < windowItems.length; offset++) {
       const item = windowItems[offset];
       const card = window.createDiv({ cls: "lumen-annotation-card" });
+      if (this.mobileRuntime) {
+        card.tabIndex = 0;
+        card.setAttribute("role", "button");
+        card.setAttribute("aria-label", `Open annotation on page ${item.page}`);
+      }
       card.style.top = `${offset * CARD_HEIGHT + 4}px`;
       card.style.setProperty("--mark-color", item.color);
       const meta = card.createDiv({ cls: "lumen-card-meta" });
@@ -1842,10 +2338,16 @@ export class LumenPdfView extends FileView {
       meta.createSpan({ text: item.kind === "page-note" ? "page note" : item.note ? "note" : markLabel(item.style) });
       card.createDiv({ cls: "lumen-card-note", text: item.note || item.quote });
       if (item.note) card.createDiv({ cls: "lumen-card-quote", text: item.quote });
-      card.addEventListener("click", () => {
+      const activate = () => {
         this.goToPage(item.page);
         this.flashAnnotation(item.id);
         this.openInspectorDetail(item.id);
+      };
+      card.addEventListener("click", activate);
+      if (this.mobileRuntime) card.addEventListener("keydown", event => {
+        if (event.key !== "Enter" && event.key !== " ") return;
+        event.preventDefault();
+        activate();
       });
     }
   }
@@ -1915,7 +2417,8 @@ export class LumenPdfView extends FileView {
           from = index + Math.max(1, query.length);
         }
       } catch { /* continue past malformed page text */ }
-      if (pageNumber % 6 === 0) await new Promise<void>(resolve => window.setTimeout(resolve, 0));
+      const yieldInterval = this.mobileRuntime ? 3 : 6;
+      if (pageNumber % yieldInterval === 0) await new Promise<void>(resolve => window.setTimeout(resolve, 0));
     }
     if (generation !== this.searchGeneration) return;
     this.renderSearchHits(hits);
@@ -1974,10 +2477,12 @@ export class LumenPdfView extends FileView {
   }
 
   private cacheSearchPage(pageNumber: number, data: SearchPageData): void {
-    if (data.text.length > MAX_SEARCH_CACHE_CHARS || data.spans.length > MAX_SEARCH_CACHE_SPANS) return;
+    const maxChars = this.mobileRuntime ? MOBILE_MAX_SEARCH_CACHE_CHARS : MAX_SEARCH_CACHE_CHARS;
+    const maxSpans = this.mobileRuntime ? MOBILE_MAX_SEARCH_CACHE_SPANS : MAX_SEARCH_CACHE_SPANS;
+    if (data.text.length > maxChars || data.spans.length > maxSpans) return;
     while (this.pageTextCache.size
-      && (this.pageTextCacheChars + data.text.length > MAX_SEARCH_CACHE_CHARS
-        || this.pageTextCacheSpans + data.spans.length > MAX_SEARCH_CACHE_SPANS)) {
+      && (this.pageTextCacheChars + data.text.length > maxChars
+        || this.pageTextCacheSpans + data.spans.length > maxSpans)) {
       let oldestPage: number | undefined;
       for (const pageNumber of this.pageTextCache.keys()) {
         oldestPage = pageNumber;
@@ -2024,15 +2529,24 @@ export class LumenPdfView extends FileView {
       pageHits.push(hit);
     }
     for (const state of this.mountedPages) this.renderSearchMarks(state.pageNumber);
-    this.searchResults.createDiv({ cls: "lumen-search-status", text: `${hits.length} match${hits.length === 1 ? "" : "es"}` });
-    for (const hit of hits.slice(0, 160)) {
+    const cardLimit = this.mobileRuntime ? MOBILE_MAX_SEARCH_RESULT_CARDS : 160;
+    const resultStatus = `${hits.length} match${hits.length === 1 ? "" : "es"}`
+      + (this.mobileRuntime && hits.length > cardLimit ? ` · first ${cardLimit} shown` : "");
+    this.searchResults.createDiv({ cls: "lumen-search-status", text: resultStatus });
+    const doc = this.mobileRuntime ? this.containerEl.ownerDocument : document;
+    for (const hit of hits.slice(0, cardLimit)) {
       const card = this.searchResults.createDiv({ cls: "lumen-search-card" });
+      if (this.mobileRuntime) {
+        card.tabIndex = 0;
+        card.setAttribute("role", "button");
+        card.setAttribute("aria-label", `Open search result on page ${hit.page}`);
+      }
       card.createDiv({ cls: "lumen-card-meta", text: `p.${hit.page}` });
       const excerpt = card.createDiv({ cls: "lumen-search-excerpt" });
-      excerpt.append(document.createTextNode(hit.before));
+      excerpt.append(doc.createTextNode(hit.before));
       excerpt.createEl("mark", { text: hit.match });
-      excerpt.append(document.createTextNode(hit.after));
-      card.addEventListener("click", () => {
+      excerpt.append(doc.createTextNode(hit.after));
+      const activate = () => {
         this.activeSearchHit = hit;
         this.goToPage(hit.page);
         const state = this.pages.get(hit.page);
@@ -2042,6 +2556,12 @@ export class LumenPdfView extends FileView {
         }
         state?.shell.classList.add("is-search-flash");
         window.setTimeout(() => state?.shell.classList.remove("is-search-flash"), 850);
+      };
+      card.addEventListener("click", activate);
+      if (this.mobileRuntime) card.addEventListener("keydown", event => {
+        if (event.key !== "Enter" && event.key !== " ") return;
+        event.preventDefault();
+        activate();
       });
     }
   }
@@ -2056,10 +2576,11 @@ export class LumenPdfView extends FileView {
       ? [this.activeSearchHit, ...pageHits.filter(hit => hit !== this.activeSearchHit)]
       : pageHits;
     let rendered = 0;
+    const rectLimit = this.mobileRuntime ? MOBILE_MAX_SEARCH_RECTS_PER_PAGE : MAX_SEARCH_RECTS_PER_PAGE;
     for (const hit of ordered) {
       const exactRects = state.textReady ? this.searchRectsForRenderedRange(state, hit.start, hit.end) : null;
       for (const rect of exactRects ?? hit.rects) {
-        if (rendered >= MAX_SEARCH_RECTS_PER_PAGE) return;
+        if (rendered >= rectLimit) return;
         const mark = searchHost.createDiv({ cls: "lumen-search-match" });
         mark.classList.toggle("is-current", hit === this.activeSearchHit);
         mark.style.left = `${rect.x * 100}%`;
@@ -2100,7 +2621,7 @@ export class LumenPdfView extends FileView {
       const rawStart = run.charStarts[localStart];
       const rawEnd = run.charEnds[localEnd - 1];
       if (rawStart === undefined || rawEnd === undefined || rawEnd <= rawStart || rawEnd > node.length) return null;
-      const range = document.createRange();
+      const range = (this.mobileRuntime ? this.containerEl.ownerDocument : document).createRange();
       range.setStart(node, rawStart);
       range.setEnd(node, rawEnd);
       for (const clientRect of Array.from(range.getClientRects())) {
@@ -2133,10 +2654,15 @@ export class LumenPdfView extends FileView {
     this.selectionPalette?.remove();
     this.selectionPalette = null;
     this.selection = null;
-    window.getSelection()?.removeAllRanges();
+    if (this.mobileRuntime) this.containerEl.ownerDocument.defaultView?.getSelection()?.removeAllRanges();
+    else window.getSelection()?.removeAllRanges();
   }
 
   private closeEditor(): void {
+    if (this.mobileRuntime) {
+      const active = this.containerEl.ownerDocument.activeElement;
+      if (active instanceof HTMLElement && this.editor?.contains(active)) active.blur();
+    }
     this.editor?.remove();
     this.editor = null;
     if (this.inspector?.classList.contains("is-open")) this.refreshInspector();
@@ -2432,12 +2958,21 @@ export class LumenPdfView extends FileView {
     window.clearTimeout(this.scrollIdleTimer);
     window.clearTimeout(this.pagePreviewTimer);
     window.clearTimeout(this.pageDetailTimer);
+    window.clearTimeout(this.selectionChangeTimer);
+    window.clearTimeout(this.mobileResizeTimer);
+    window.clearTimeout(this.mobileKeyboardProbeTimer);
+    this.cancelMobileLongPress();
     this.scrollIdleTimer = 0;
     this.pagePreviewTimer = 0;
     this.pagePreviewReadyAt = 0;
     this.pageDetailTimer = 0;
+    this.selectionChangeTimer = 0;
+    this.mobileResizeTimer = 0;
+    this.mobileKeyboardProbeTimer = 0;
+    this.mobileKeyboardProbeCount = 0;
     this.pageDetailReadyAt = 0;
     this.isScrolling = false;
+    this.mobileSuspended = false;
     for (const state of this.pages.values()) {
       state.wanted = false;
       state.mounted = false;

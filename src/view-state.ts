@@ -5,6 +5,7 @@ interface PdfViewState {
   page: number;
   zoom: number;
   updatedAt: number;
+  mobileFit?: boolean;
 }
 
 interface PdfViewStateData {
@@ -19,6 +20,12 @@ interface PluginDataWithViewState {
 
 const SAVE_DELAY_MS = 450;
 const MAX_ENTRIES = 2000;
+
+function stateKey(view: LumenPdfView, path: string): string {
+  // Mobile zoom is normally fit-to-width and must not overwrite the desktop
+  // reader position when Obsidian Sync carries plugin data between devices.
+  return view.isMobileView() ? `mobile:${path}` : path;
+}
 
 /**
  * Persists only lightweight reader state. It deliberately never touches the
@@ -50,7 +57,7 @@ export class PdfViewStateManager {
     if (!root || this.attached.has(root)) return;
     this.attached.add(root);
 
-    const saved = this.data.pdfs[view.file.path];
+    const saved = this.data.pdfs[stateKey(view, view.file.path)];
     if (saved) this.restoreWhenReady(view, root, saved);
 
     let timer = 0;
@@ -65,7 +72,8 @@ export class PdfViewStateManager {
     let cleanup: () => void;
     const host = root.parentElement;
     const mutationObserver = host ? new MutationObserver(() => {
-      if (!document.contains(root)) cleanup();
+      const doc = view.isMobileView() ? root.ownerDocument : document;
+      if (!doc.contains(root)) cleanup();
     }) : null;
     mutationObserver?.observe(host!, { childList: true });
 
@@ -96,15 +104,16 @@ export class PdfViewStateManager {
 
   private restore(view: LumenPdfView, root: HTMLElement, state: PdfViewState): void {
     const zoomLabel = root.querySelector<HTMLElement>(".lumen-zoom-label");
-    const desiredZoom = Math.max(0.5, Math.min(4, Math.round(state.zoom * 4) / 4));
+    const roundedZoom = view.isMobileView() ? Math.round(state.zoom * 20) / 20 : Math.round(state.zoom * 4) / 4;
+    const desiredZoom = Math.max(view.minimumZoom(), Math.min(4, roundedZoom));
     const page = Math.max(1, Math.round(state.page));
     const currentZoom = Number.parseInt(zoomLabel?.textContent ?? "125", 10) / 100;
     const applyPage = () => window.setTimeout(() => view.restorePage(page), 0);
-    if (Math.abs(desiredZoom - currentZoom) < 0.001) {
+    if (!view.isMobileView() && Math.abs(desiredZoom - currentZoom) < 0.001) {
       applyPage();
       return;
     }
-    void view.restoreZoom(desiredZoom)
+    void view.restoreZoom(desiredZoom, Boolean(state.mobileFit))
       .then(applyPage)
       .catch(error => console.warn("Lumen could not restore PDF view state", error));
   }
@@ -115,7 +124,12 @@ export class PdfViewStateManager {
     const page = Number.parseInt(root.querySelector<HTMLInputElement>(".lumen-page-input")?.value ?? "1", 10);
     const zoom = Number.parseInt(root.querySelector<HTMLElement>(".lumen-zoom-label")?.textContent ?? "125", 10) / 100;
     if (!Number.isFinite(page) || !Number.isFinite(zoom)) return;
-    this.data.pdfs[path] = { page: Math.max(1, page), zoom: Math.max(0.5, Math.min(4, zoom)), updatedAt: Date.now() };
+    this.data.pdfs[stateKey(view, path)] = {
+      page: Math.max(1, page),
+      zoom: Math.max(view.minimumZoom(), Math.min(4, zoom)),
+      updatedAt: Date.now(),
+      mobileFit: view.usesMobileFit() || undefined,
+    };
     this.data.pdfs = Object.fromEntries(Object.entries(this.data.pdfs)
       .sort((a, b) => b[1].updatedAt - a[1].updatedAt)
       .slice(0, MAX_ENTRIES));
