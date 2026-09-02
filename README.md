@@ -4,7 +4,7 @@ Read, search, highlight, and annotate PDFs inside Obsidian with a calm interface
 
 ![Lumen PDF Annotator showing its compact floating toolbar](assets/lumen-reader.jpeg)
 
-Lumen is a desktop-first PDF reader for research-heavy vaults. It combines document themes, contextual full-PDF search, fast text markup, searchable notes, and local recovery files without modifying the source PDF or sending its contents anywhere.
+Lumen is a PDF reader for research-heavy vaults on desktop, phone, and tablet. It combines document themes, contextual full-PDF search, fast text markup, searchable notes, and local recovery files without modifying the source PDF or sending its contents anywhere.
 
 ## What it feels like
 
@@ -13,7 +13,7 @@ Lumen is a desktop-first PDF reader for research-heavy vaults. It combines docum
 - A floating PDF search that shows long, left-aligned excerpts so results make sense before you open them.
 - A virtualized annotation inspector with bright colour edges, readable quotes, notes, and one-click navigation.
 - A full editor for each saved mark, including colour, style, note, tags, copy, and delete.
-- Right-click any saved highlight to copy a Markdown link that opens its PDF, page, and exact annotation from another note.
+- Right-click any saved highlight on desktop—or long-press it on mobile—to copy a Markdown link that opens its PDF, page, and exact annotation from another note.
 - Extend an existing text annotation from its editor; an opaque, content-sized preview with muted text shows the exact pending quote before confirmation, and additional selections can be on the same page, a different page, or span a page boundary while remaining one logical annotation.
 - Click-to-place page notes, readable exports, checksum verification, and recovery from the local PDF backup.
 
@@ -41,6 +41,7 @@ Lumen was built around large documents and dense annotation sets rather than opt
 - Snapshot restore, annotation journals, and compact checkpoint serialization yield in bounded batches so six-figure loads and saves do not monopolize the UI thread. Closing or switching a PDF flushes only recent journal changes rather than rebuilding the entire snapshot.
 - Stable PDF metadata caches the content hash so unchanged large files are not re-hashed on every open. Optional recovery copies run in the background and are disabled by default to avoid cloud-vault sync pressure.
 - Each open PDF receives its own bundled, version-matched PDF.js worker.
+- Mobile keeps the same single-page render queue and virtualized annotation architecture, while using a fit-to-width starting scale, a smaller near-page render window, a 6-million-pixel canvas ceiling, earlier dense-mark canvas promotion, and bounded 8-million-character search cache. Backgrounding the app cancels unfinished page work, flushes recent annotation journal entries, and resumes visible-page detail after return.
 
 A private synthetic benchmark used during 1.0.5 development inserted and search-indexed 100,000 annotations across 1,000 pages in 209.77 ms, traversed every page bucket in 12.80 ms, and searched all annotations in 18.13 ms on the development machine. A separate extreme run indexed 250,000 annotations across 2,000 pages in 576.63 ms, applied 10,000 edits in 72.80 ms, fetched a 12-card inspector window from the middle of the collection in 6.99 ms, traversed all page buckets in 34.76 ms, filtered the full collection in 60.07 ms, and sorted it in 10.76 ms. Those figures describe the in-memory index. A 100,000-record storage run restored the compact snapshot in 550.01 ms while returning to the host between 1,000-record batches, then produced a 28.24 MB compact checkpoint in 252.40 ms.
 
@@ -85,7 +86,7 @@ Once Lumen is accepted into the community directory:
 3. Place all three files in that folder.
 4. Reload Obsidian, then enable **Lumen PDF Annotator** under Community plugins.
 
-Lumen currently supports desktop Obsidian 1.13.7 or newer.
+Lumen supports Obsidian 1.13.7 or newer on desktop, iOS, and Android.
 
 ## Use
 
@@ -93,7 +94,9 @@ Open any PDF after enabling Lumen. The PDF search and annotation inspector begin
 
 Select text to open the compact markup palette. Choose a colour first, then choose a mark type to apply it immediately—there is no separate confirmation step. Choosing the comment type also opens the individual editor so you can add its note. Nothing is saved merely by choosing a swatch. Click an existing mark or its inspector card to open the individual editor. Use the sticky-note icon or **Place a page note** command to place a note anywhere on a page. PDF search marks every exact match on the rendered page, upgrades visible results to PDF.js's exact text-range geometry at every zoom level, and strengthens the selected result. The toolbar's theme controls affect the reading surface and editor together; the chosen theme persists and Lumen button text and icons follow your Obsidian accent colour in every PDF theme.
 
-Right-click a saved mark and choose **Copy link to highlight**. Paste the resulting Markdown link into any note in the same vault; following it opens the PDF in a new tab, scrolls to the linked annotation, flashes it, and opens its editor. To add more text to a saved annotation, open its editor and use the scan-text icon. Navigate if needed, select the additional text, check the opaque quote preview with muted text beneath the floating **Extend annotation** action, and confirm. Cross-page segments share colour, style, note, tags, link target, inspector card, and deletion as one annotation.
+Right-click a saved mark on desktop, or long-press it on mobile, and choose **Copy link to highlight**. Paste the resulting Markdown link into any note in the same vault; following it opens the PDF, scrolls to the linked annotation, flashes it, and opens its editor. To add more text to a saved annotation, open its editor and use the scan-text icon. Navigate if needed, select the additional text, check the opaque quote preview with muted text beneath the floating **Extend annotation** action, and confirm. Cross-page segments share colour, style, note, tags, link target, inspector card, and deletion as one annotation.
+
+On phones, the toolbar uses two compact touch rows and search, annotations, the selection palette, and the individual editor open as safe-area-aware bottom sheets. On tablets the toolbar returns to one row and the side tools remain docked to the nearest edge. Mobile PDF position and zoom are stored separately from desktop state, so a phone's fit-to-width scale never changes the same document's desktop layout.
 
 Default hotkeys:
 
@@ -133,7 +136,7 @@ The production build is written to `dist/`. For a live development build, set `L
 
 ## Scope and roadmap
 
-The first public release is desktop-only. Planned work includes additional portable export formats, accessibility refinement, and performance profiling across a wider range of scanned and malformed PDFs.
+Planned work includes additional portable export formats and performance profiling across a wider range of scanned and malformed PDFs and mobile devices.
 
 Please report a reproducible document issue through the bug template. Do not upload a private PDF; use a minimal public or synthetic reproduction whenever possible.
 

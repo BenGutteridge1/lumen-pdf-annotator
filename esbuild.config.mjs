@@ -10,11 +10,19 @@ const outputDirectory = process.env.LUMEN_PDF_ANNOTATOR_PLUGIN_DIR ?? path.resol
 const workerPath = require.resolve("pdfjs-dist/build/pdf.worker.min.mjs");
 fs.mkdirSync(outputDirectory, { recursive: true });
 
+function replacePromiseCapabilities(source, filename) {
+  const nativeCall = "Promise.withResolvers()";
+  const helper = "function lumenPromiseWithResolvers(){let resolve,reject;const promise=new Promise((accept,decline)=>{resolve=accept;reject=decline});return{promise,resolve,reject}}\n";
+  const result = source.replaceAll(nativeCall, "lumenPromiseWithResolvers()");
+  if (result.includes(nativeCall)) throw new Error(`Unable to make PDF.js promise capabilities portable in ${filename}`);
+  return helper + result;
+}
+
 function sanitizeApi(source, filename) {
   const before = `function isEvalSupported() {\n  try {\n    new Function(\"\");\n    return true;\n  } catch {\n    return false;\n  }\n}`;
   const after = `function isEvalSupported() {\n  return false;\n}`;
   if (!source.includes(before)) throw new Error(`Unable to disable PDF.js eval probe in ${filename}`);
-  const result = source.replace(before, after);
+  const result = replacePromiseCapabilities(source.replace(before, after), filename);
   if (result.includes("new Function") || result.includes("eval(")) throw new Error(`Runtime code generation remains in ${filename}`);
   return result;
 }
@@ -23,7 +31,10 @@ function sanitizeWorker(source, filename) {
   const evalProbe = `function isEvalSupported(){try{new Function(\"\");return!0}catch{return!1}}`;
   const postScript = `if(t&&FeatureTest.isEvalSupported){const e=(new PostScriptCompiler).compile(g,s,r);if(e)return new Function(\"src\",\"srcOffset\",\"dest\",\"destOffset\",e)}`;
   if (!source.includes(evalProbe) || !source.includes(postScript)) throw new Error(`Unexpected PDF.js worker layout in ${filename}`);
-  const result = source.replace(evalProbe, `function isEvalSupported(){return!1}`).replace(postScript, `if(false){}`);
+  const result = replacePromiseCapabilities(
+    source.replace(evalProbe, `function isEvalSupported(){return!1}`).replace(postScript, `if(false){}`),
+    filename,
+  );
   if (result.includes("new Function") || result.includes("eval(")) throw new Error(`Runtime code generation remains in ${filename}`);
   return result;
 }

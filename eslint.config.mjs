@@ -22,5 +22,8 @@ export default tseslint.config(
       },
       parserOptions: { project: "./tsconfig.json" },
     },
+    rules: {
+      "obsidianmd/ui/sentence-case": ["warn", { brands: ["Lumen", "Obsidian"] }],
+    },
   },
 );

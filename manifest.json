@@ -1,10 +1,10 @@
 {
   "id": "lumen-pdf-annotator",
   "name": "Lumen PDF Annotator",
-  "version": "1.0.11",
+  "version": "1.0.12",
   "minAppVersion": "1.13.7",
   "description": "Read, search, highlight, and annotate PDFs with themes, searchable notes, local storage, and performance-focused rendering.",
   "author": "Ben Gutteridge",
   "authorUrl": "https://github.com/BenGutteridge1",
-  "isDesktopOnly": true
+  "isDesktopOnly": false
 }

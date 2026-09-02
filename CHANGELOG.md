@@ -2,6 +2,17 @@
 
 All notable changes to Lumen PDF Annotator are documented here.
 
+## 1.0.12 — 2026-09-02
+
+- Enabled installation on iOS and Android without changing the established desktop reader path.
+- Added phone and tablet layouts with fit-to-width startup, safe-area-aware toolbars and bottom sheets, keyboard-aware annotation editing, native touch selection capture, and long-press annotation menus.
+- Kept mobile and desktop page/zoom state separate so synchronized plugin data cannot transfer a phone scale into a desktop reader.
+- Added mobile-specific canvas, search-cache, inspector-overscan, dense-mark, and near-page limits, plus background render cancellation and journal flushing.
+- Added PDF.js-managed mobile worker startup with its built-in loopback fallback for WebViews that reject direct worker creation.
+- Kept search, annotation panels, and the individual editor above the mobile keyboard using Obsidian's native keyboard metrics with visual-viewport and conservative fallbacks, without re-fitting or re-rendering the PDF during keyboard animation.
+- Kept the PDF reader visible behind keyboard-focused panels on Android WebViews that resize the Obsidian leaf, avoiding the large black region beneath Find in PDF and the annotation inspector.
+- Replaced the ambiguous mobile theme dots with labelled Light, Sepia, and Dark controls.
+
 ## 1.0.11 — 2026-08-29
 
 - Repaired release packaging with a valid dependency lockfile so automated reviews can resolve the existing TypeScript and Obsidian dependencies correctly.

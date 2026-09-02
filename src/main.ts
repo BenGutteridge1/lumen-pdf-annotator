@@ -1,4 +1,4 @@
-import { FuzzySuggestModal, normalizePath, Notice, ObsidianProtocolData, Plugin, PluginSettingTab, TFile } from "obsidian";
+import { FuzzySuggestModal, normalizePath, Notice, ObsidianProtocolData, Platform, Plugin, PluginSettingTab, TFile } from "obsidian";
 import type { SettingDefinitionItem } from "obsidian";
 import { LUMEN_PROTOCOL_ACTION } from "./links";
 import { disposePdfRuntime } from "./pdf-runtime";
@@ -111,7 +111,14 @@ export default class LumenPdfPlugin extends Plugin {
     // Obsidian reserves the PDF extension for its built-in view, so
     // registerExtensions() rejects it. Preserve and restore the exact prior
     // mapping instead of deleting or permanently mutating the core handler.
-    const registry = (this.app as unknown as { viewRegistry: ViewRegistryWithExtensions }).viewRegistry;
+    const registry = (this.app as unknown as { viewRegistry?: ViewRegistryWithExtensions }).viewRegistry;
+    if (!registry?.typeByExtension) {
+      if (Platform.isMobile) {
+        console.warn("Lumen could not replace the built-in PDF extension mapping on this mobile Obsidian build.");
+        return;
+      }
+      throw new Error("Obsidian's PDF view registry is unavailable");
+    }
     const previous = registry.typeByExtension.pdf;
     registry.typeByExtension.pdf = LUMEN_VIEW_TYPE;
     this.register(() => {
