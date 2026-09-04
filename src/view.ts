@@ -29,6 +29,9 @@ const PAGE_PREVIEW_DELAY_MS = 90;
 const TEXT_LAYER_IDLE_DELAY_MS = 80;
 const PAGE_DETAIL_DELAY_MS = 480;
 const SCROLL_PREVIEW_DPR = .65;
+const CURRENT_PAGE_VIEWPORT_FRACTION = .12;
+const CURRENT_PAGE_MIN_OFFSET = 72;
+const CURRENT_PAGE_MAX_OFFSET = 160;
 const SEARCH_WHITESPACE = /\s/;
 const MOBILE_MAX_CANVAS_PIXELS = 6_000_000;
 const MOBILE_MAX_MARK_CANVAS_PIXELS = 2_000_000;
@@ -1388,7 +1391,16 @@ export class LumenPdfView extends FileView {
 
   private updateCurrentPage(): void {
     if (!this.pdfDocument) return;
-    const target = this.scrollEl.scrollTop + 24;
+    // Treat the upper portion of the viewport as the reader's page-change
+    // boundary. A fixed 24px boundary made the outgoing page stay current
+    // until it was almost completely gone; this responsive, bounded anchor
+    // lets the incoming page take over once it reaches the main reading area.
+    const viewportOffset = clamp(
+      this.scrollEl.clientHeight * CURRENT_PAGE_VIEWPORT_FRACTION,
+      CURRENT_PAGE_MIN_OFFSET,
+      CURRENT_PAGE_MAX_OFFSET,
+    );
+    const target = this.scrollEl.scrollTop + viewportOffset;
     let low = 1;
     let high = this.pdfDocument.numPages;
     let bestPage = 1;
