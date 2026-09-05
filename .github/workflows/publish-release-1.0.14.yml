@@ -1,0 +1,61 @@
+name: Publish release 1.0.14
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/publish-release-1.0.14.yml"
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out 1.0.14
+        uses: actions/checkout@v4
+        with:
+          ref: 1.0.14
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify source
+        run: npm run typecheck && npm run lint && npm run build
+
+      - name: Verify release version
+        run: |
+          test "$(node -p "require('./manifest.json').version")" = "1.0.14"
+          test "$(node -p "require('./package.json').version")" = "1.0.14"
+          grep -q 'context.globalAlpha = .30;' src/view.ts
+          if grep -q 'context.globalAlpha = .62;' src/view.ts; then exit 1; fi
+
+      - name: Attest main.js
+        uses: actions/attest@v4
+        with:
+          subject-path: dist/main.js
+
+      - name: Attest styles.css
+        uses: actions/attest@v4
+        with:
+          subject-path: dist/styles.css
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "1.0.14" >/dev/null 2>&1; then
+            gh release upload "1.0.14" dist/main.js dist/manifest.json dist/styles.css --clobber
+          else
+            gh release create "1.0.14" dist/main.js dist/manifest.json dist/styles.css --title "Lumen PDF Annotator 1.0.14" --generate-notes
+          fi
