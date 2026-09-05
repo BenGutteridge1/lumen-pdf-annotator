@@ -1,0 +1,104 @@
+name: Prepare Lumen 1.0.14
+
+on:
+  push:
+    branches:
+      - "release/1.0.14"
+    paths:
+      - ".github/workflows/prepare-release-1.0.14.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out release branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Set highlighter opacity and bump release metadata
+        run: |
+          node <<'NODE'
+          const fs = require('fs');
+
+          const viewPath = 'src/view.ts';
+          let view = fs.readFileSync(viewPath, 'utf8');
+          const oldHighlight = `    } else if (annotation.style === "highlight") {\n      context.globalAlpha = .62;\n      context.fillRect(x, y, width, height);`;
+          const newHighlight = `    } else if (annotation.style === "highlight") {\n      context.globalAlpha = .30;\n      context.fillRect(x, y, width, height);`;
+          const occurrences = view.split(oldHighlight).length - 1;
+          if (occurrences !== 1) {
+            throw new Error(`Expected exactly one 62% highlighter renderer, found ${occurrences}`);
+          }
+          view = view.replace(oldHighlight, newHighlight);
+          fs.writeFileSync(viewPath, view);
+
+          const writeJson = (path, value) => fs.writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`);
+
+          const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          if (pkg.version !== '1.0.13') throw new Error(`Unexpected package version: ${pkg.version}`);
+          pkg.version = '1.0.14';
+          writeJson('package.json', pkg);
+
+          const manifest = JSON.parse(fs.readFileSync('manifest.json', 'utf8'));
+          if (manifest.version !== '1.0.13') throw new Error(`Unexpected manifest version: ${manifest.version}`);
+          manifest.version = '1.0.14';
+          writeJson('manifest.json', manifest);
+
+          const lock = JSON.parse(fs.readFileSync('package-lock.json', 'utf8'));
+          if (lock.version !== '1.0.13' || lock.packages?.['']?.version !== '1.0.13') {
+            throw new Error('Unexpected package-lock release version');
+          }
+          lock.version = '1.0.14';
+          lock.packages[''].version = '1.0.14';
+          writeJson('package-lock.json', lock);
+
+          const versions = JSON.parse(fs.readFileSync('versions.json', 'utf8'));
+          if (versions['1.0.14']) throw new Error('versions.json already contains 1.0.14');
+          versions['1.0.14'] = manifest.minAppVersion;
+          writeJson('versions.json', versions);
+          NODE
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify source and build
+        run: |
+          npm run typecheck
+          npm run lint
+          npm run build
+          node <<'NODE'
+          const fs = require('fs');
+          const source = fs.readFileSync('src/view.ts', 'utf8');
+          if (!source.includes('annotation.style === "highlight"') || !source.includes('context.globalAlpha = .30;')) {
+            throw new Error('30% highlighter opacity is missing after build');
+          }
+          if (source.includes('context.globalAlpha = .62;')) {
+            throw new Error('Old 62% highlighter opacity is still present');
+          }
+          for (const path of ['package.json', 'manifest.json']) {
+            const value = JSON.parse(fs.readFileSync(path, 'utf8'));
+            if (value.version !== '1.0.14') throw new Error(`${path} is not 1.0.14`);
+          }
+          const lock = JSON.parse(fs.readFileSync('package-lock.json', 'utf8'));
+          if (lock.version !== '1.0.14' || lock.packages?.['']?.version !== '1.0.14') throw new Error('package-lock.json is not 1.0.14');
+          const versions = JSON.parse(fs.readFileSync('versions.json', 'utf8'));
+          if (!versions['1.0.14']) throw new Error('versions.json is missing 1.0.14');
+          NODE
+
+      - name: Commit prepared release branch
+        run: |
+          rm .github/workflows/prepare-release-1.0.14.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Release Lumen PDF Annotator 1.0.14"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
