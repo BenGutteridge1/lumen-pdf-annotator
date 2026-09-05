@@ -1944,7 +1944,7 @@ export class LumenPdfView extends FileView {
       context.lineTo(x + 16, y + 13);
       context.stroke();
     } else if (annotation.style === "highlight") {
-      context.globalAlpha = .62;
+      context.globalAlpha = .30;
       context.fillRect(x, y, width, height);
     } else if (annotation.style === "box") {
       context.globalAlpha = .12;
