@@ -5,6 +5,7 @@ import { annotationMarkdownLink } from "./links";
 import { AnnotationIndex, MARK_COLORS, MarkStyle, newAnnotation, newPageNote, NormalizedRect, PdfAnnotation } from "./model";
 import { annotationTarget, comparableFileName, QuoteAnnotationRecord, quoteAnnotations } from "./legacy";
 import { loadPdf } from "./pdf-runtime";
+import { filterOutlineEntries, outlineDestinationOffset, ResolvedOutlineEntry, resolvePdfOutline } from "./outline";
 import { DocumentBundle, LegacyAnnotationRecord, loadLegacyAnnotations, openBundle } from "./storage";
 
 export const LUMEN_VIEW_TYPE = "lumen-pdf-view";
@@ -230,6 +231,13 @@ export class LumenPdfView extends FileView {
   private searchPanel!: HTMLElement;
   private searchInput!: HTMLInputElement;
   private searchResults!: HTMLElement;
+  private outlinePanel!: HTMLElement;
+  private outlineInput!: HTMLInputElement;
+  private outlineList!: HTMLElement;
+  private outlineButton: HTMLButtonElement | null = null;
+  private outlineEntries: ResolvedOutlineEntry[] = [];
+  private outlineFilterTimer = 0;
+  private themeButton: HTMLButtonElement | null = null;
   private inspector!: HTMLElement;
   private inspectorList!: HTMLElement;
   private inspectorQuery!: HTMLInputElement;
@@ -331,6 +339,7 @@ export class LumenPdfView extends FileView {
       if (this.editor) this.closeEditor();
       else if (this.selectionPalette) this.closeSelectionPalette();
       else if (this.searchPanel?.classList.contains("is-open")) this.toggleSearch();
+      else if (this.outlinePanel?.classList.contains("is-open")) this.toggleOutline();
       else if (this.inspector?.classList.contains("is-open")) this.toggleInspector();
       else if (this.pageNotePlacement) this.togglePageNotePlacement();
       else return true;
@@ -408,6 +417,9 @@ export class LumenPdfView extends FileView {
     this.index = index;
     for (const state of this.mountedPages) this.renderMarks(state.pageNumber);
     this.refreshInspector();
+    window.setTimeout(() => {
+      if (generation === this.documentGeneration) void this.loadOutline(generation);
+    }, 0);
   }
 
   async onUnloadFile(): Promise<void> {
@@ -416,6 +428,7 @@ export class LumenPdfView extends FileView {
 
   toggleSearch(): void {
     const opening = !this.searchPanel.classList.contains("is-open");
+    if (opening && this.outlinePanel.classList.contains("is-open")) this.toggleOutline();
     if (opening && this.mobileRuntime && this.inspector.classList.contains("is-open")) this.toggleInspector();
     this.searchPanel.classList.toggle("is-open", opening);
     if (opening) window.setTimeout(() => this.searchInput.focus(), 0);
@@ -428,9 +441,28 @@ export class LumenPdfView extends FileView {
     }
   }
 
+  toggleOutline(): void {
+    if (!this.outlineEntries.length) return;
+    const opening = !this.outlinePanel.classList.contains("is-open");
+    if (opening && this.searchPanel.classList.contains("is-open")) this.toggleSearch();
+    if (opening && this.mobileRuntime && this.inspector.classList.contains("is-open")) this.toggleInspector();
+    this.outlinePanel.classList.toggle("is-open", opening);
+    this.outlineButton?.classList.toggle("is-active", opening);
+    this.outlineButton?.setAttribute("aria-pressed", String(opening));
+    if (opening) {
+      this.renderOutline();
+      if (!this.mobileRuntime) window.setTimeout(() => this.outlineInput.focus(), 0);
+    } else if (this.mobileRuntime) {
+      this.outlineInput.blur();
+    }
+  }
+
   toggleInspector(): void {
     const opening = !this.inspector.classList.contains("is-open");
-    if (opening && this.mobileRuntime && this.searchPanel.classList.contains("is-open")) this.toggleSearch();
+    if (opening && this.mobileRuntime) {
+      if (this.searchPanel.classList.contains("is-open")) this.toggleSearch();
+      if (this.outlinePanel.classList.contains("is-open")) this.toggleOutline();
+    }
     this.inspector.classList.toggle("is-open", opening);
     this.rootEl.classList.toggle("has-inspector", opening);
     if (opening) this.refreshInspector(true);
@@ -520,9 +552,11 @@ export class LumenPdfView extends FileView {
     this.scrollEl = this.rootEl.createDiv({ cls: "lumen-scroll" });
     this.pagesEl = this.scrollEl.createDiv({ cls: "lumen-pages" });
     this.searchPanel = this.rootEl.createDiv({ cls: "lumen-search-panel" });
+    this.outlinePanel = this.rootEl.createDiv({ cls: "lumen-outline-panel" });
     this.inspector = this.rootEl.createDiv({ cls: "lumen-inspector" });
     this.buildToolbar(file);
     this.buildSearchPanel();
+    this.buildOutlinePanel();
     this.buildInspector();
     this.pagesEl.addEventListener("click", event => {
       if (this.suppressNextAnnotationClick) {
@@ -652,16 +686,19 @@ export class LumenPdfView extends FileView {
 
     const actions = this.toolbarEl.createDiv({ cls: "lumen-toolbar-actions" });
     actions.append(iconButton("search", "Search PDF", () => this.toggleSearch()));
+    this.outlineButton = iconButton("list-tree", "Table of contents", () => this.toggleOutline());
+    this.outlineButton.addClass("lumen-outline-button");
+    this.outlineButton.hidden = true;
+    this.outlineButton.setAttribute("aria-pressed", "false");
+    actions.append(this.outlineButton);
     actions.append(iconButton("messages-square", "Annotations", () => this.toggleInspector()));
     this.pageNoteButton = iconButton("sticky-note", "Place a page note", () => this.togglePageNotePlacement());
     this.pageNoteButton.setAttribute("aria-pressed", "false");
     actions.append(this.pageNoteButton);
-    const themes = actions.createDiv({ cls: "lumen-theme-switcher" });
-    for (const value of ["light", "sepia", "dark"] as const) {
-      const button = themes.createEl("button", { text: value[0].toUpperCase() + value.slice(1) });
-      button.classList.toggle("is-active", value === this.theme);
-      button.addEventListener("click", () => this.setTheme(value));
-    }
+    this.themeButton = iconButton(this.theme === "light" ? "sun" : this.theme === "sepia" ? "coffee" : "moon", `PDF theme: ${this.theme}`, () => this.showThemeMenu());
+    this.themeButton.addClass("lumen-theme-button");
+    this.themeButton.dataset.theme = this.theme;
+    actions.append(this.themeButton);
 
     this.pageInput = pageInput;
     this.pageTotal = pageTotal;
@@ -681,6 +718,117 @@ export class LumenPdfView extends FileView {
       window.clearTimeout(timer);
       timer = window.setTimeout(() => void this.runSearch(this.searchInput.value), 170);
     });
+  }
+
+  private buildOutlinePanel(): void {
+    this.outlinePanel.setAttribute("aria-label", "PDF table of contents");
+    const header = this.outlinePanel.createDiv({ cls: "lumen-panel-header" });
+    header.createSpan({ text: "Table of contents" });
+    header.append(iconButton("x", "Close table of contents", () => this.toggleOutline()));
+    const inputWrap = this.outlinePanel.createDiv({ cls: "lumen-search-input-wrap" });
+    setIcon(inputWrap.createSpan(), "search");
+    this.outlineInput = inputWrap.createEl("input", {
+      attr: { type: "search", placeholder: "Filter headings", "aria-label": "Filter table of contents" },
+    });
+    this.outlineList = this.outlinePanel.createDiv({ cls: "lumen-outline-list", attr: { role: "tree" } });
+    this.outlineInput.addEventListener("input", () => {
+      window.clearTimeout(this.outlineFilterTimer);
+      this.outlineFilterTimer = window.setTimeout(() => this.renderOutline(), 100);
+    });
+  }
+
+  private async loadOutline(generation: number): Promise<void> {
+    const document = this.pdfDocument;
+    if (!document) return;
+    try {
+      const source = await document.getOutline();
+      if (generation !== this.documentGeneration || document !== this.pdfDocument) return;
+      this.outlineEntries = await resolvePdfOutline(document, source);
+      if (generation !== this.documentGeneration || document !== this.pdfDocument) return;
+      if (this.outlineButton) {
+        this.outlineButton.hidden = this.outlineEntries.length === 0;
+        this.outlineButton.setAttribute("aria-label", `Table of contents, ${this.outlineEntries.length} headings`);
+      }
+    } catch (error) {
+      if (generation === this.documentGeneration) console.warn("Lumen could not load the PDF table of contents", error);
+    }
+  }
+
+  private renderOutline(): void {
+    if (!this.outlineList) return;
+    this.outlineList.empty();
+    const entries = filterOutlineEntries(this.outlineEntries, this.outlineInput?.value ?? "");
+    if (!entries.length) {
+      this.outlineList.createDiv({ cls: "lumen-empty", text: "No matching headings" });
+      return;
+    }
+    const fragment = createFragment();
+    for (const entry of entries) {
+      const button = fragment.createEl("button", {
+        cls: "lumen-outline-item",
+        attr: {
+          role: "treeitem",
+          "aria-level": String(entry.depth + 1),
+          "aria-label": `${entry.title}, PDF page ${entry.pageNumber}`,
+          title: entry.title,
+        },
+      });
+      button.style.setProperty("--lumen-outline-indent", `${Math.min(entry.depth, 12) * 14}px`);
+      button.createSpan({ cls: "lumen-outline-title", text: entry.title });
+      button.createSpan({
+        cls: "lumen-outline-page",
+        text: `p. ${entry.pageNumber}`,
+        attr: { "aria-hidden": "true" },
+      });
+      button.addEventListener("click", () => void this.navigateToOutlineEntry(entry));
+    }
+    this.outlineList.append(fragment);
+  }
+
+  private async navigateToOutlineEntry(entry: ResolvedOutlineEntry): Promise<void> {
+    const generation = this.documentGeneration;
+    const document = this.pdfDocument;
+    const state = this.pages.get(entry.pageNumber);
+    if (!document || !state) return;
+    try {
+      const page = state.page ?? await document.getPage(entry.pageNumber);
+      if (generation !== this.documentGeneration || document !== this.pdfDocument) return;
+      const viewport = page.getViewport({ scale: this.zoom });
+      state.page = page;
+      this.sizePage(state, viewport.width / this.zoom, viewport.height / this.zoom);
+      const offset = outlineDestinationOffset(entry.destination, viewport);
+      this.currentPage = entry.pageNumber;
+      this.pageInput.value = String(entry.pageNumber);
+      const rootRect = this.scrollEl.getBoundingClientRect();
+      const shellRect = state.shell.getBoundingClientRect();
+      const toolbarBottom = this.toolbarEl.getBoundingClientRect().bottom - rootRect.top;
+      const clearance = Math.max(14, toolbarBottom + 8);
+      const top = this.scrollEl.scrollTop + shellRect.top - rootRect.top + Math.min(offset.top, shellRect.height) - clearance;
+      const left = this.scrollEl.scrollLeft + shellRect.left - rootRect.left + Math.min(offset.left, shellRect.width) - 14;
+      if (this.mobileRuntime) this.toggleOutline();
+      this.scrollEl.scrollTo({ top: Math.max(0, top), left: Math.max(0, left), behavior: "smooth" });
+    } catch (error) {
+      if (generation === this.documentGeneration) console.warn(`Lumen could not open PDF heading on page ${entry.pageNumber}`, error);
+    }
+  }
+
+  private showThemeMenu(): void {
+    const button = this.themeButton;
+    if (!button) return;
+    const menu = new Menu();
+    for (const [value, label, icon] of [
+      ["light", "Light", "sun"],
+      ["sepia", "Sepia", "coffee"],
+      ["dark", "Dark", "moon"],
+    ] as const) {
+      menu.addItem(item => item
+        .setTitle(label)
+        .setIcon(icon)
+        .setChecked(value === this.theme)
+        .onClick(() => this.setTheme(value)));
+    }
+    const rect = button.getBoundingClientRect();
+    menu.showAtPosition({ x: rect.left, y: rect.bottom + 4 }, this.containerEl.ownerDocument);
   }
 
   private buildInspector(): void {
@@ -1154,9 +1302,11 @@ export class LumenPdfView extends FileView {
     if (appAccent) this.rootEl.style.setProperty("--lumen-accent", appAccent);
     this.rootEl.classList.remove("theme-light", "theme-sepia", "theme-dark");
     this.rootEl.classList.add(`theme-${theme}`);
-    this.toolbarEl.querySelectorAll(".lumen-theme-switcher button").forEach(button => {
-      button.classList.toggle("is-active", button.textContent?.toLowerCase() === theme);
-    });
+    if (this.themeButton) {
+      this.themeButton.dataset.theme = theme;
+      this.themeButton.setAttribute("aria-label", `PDF theme: ${theme}`);
+      setIcon(this.themeButton, theme === "light" ? "sun" : theme === "sepia" ? "coffee" : "moon");
+    }
     this.syncDetachedTheme(this.selectionPalette);
     this.syncDetachedTheme(this.editor);
     if (changed) this.onThemeChange?.(theme);
@@ -2973,6 +3123,7 @@ export class LumenPdfView extends FileView {
     window.clearTimeout(this.selectionChangeTimer);
     window.clearTimeout(this.mobileResizeTimer);
     window.clearTimeout(this.mobileKeyboardProbeTimer);
+    window.clearTimeout(this.outlineFilterTimer);
     this.cancelMobileLongPress();
     this.scrollIdleTimer = 0;
     this.pagePreviewTimer = 0;
@@ -2981,6 +3132,7 @@ export class LumenPdfView extends FileView {
     this.selectionChangeTimer = 0;
     this.mobileResizeTimer = 0;
     this.mobileKeyboardProbeTimer = 0;
+    this.outlineFilterTimer = 0;
     this.mobileKeyboardProbeCount = 0;
     this.pageDetailReadyAt = 0;
     this.isScrolling = false;
@@ -3006,6 +3158,9 @@ export class LumenPdfView extends FileView {
     this.mountedPages.clear();
     this.pageNotePlacement = false;
     this.pageNoteButton = null;
+    this.outlineButton = null;
+    this.themeButton = null;
+    this.outlineEntries = [];
     this.pageTextCache.clear();
     this.pageTextCacheChars = 0;
     this.pageTextCacheSpans = 0;
