@@ -5,7 +5,14 @@ import { annotationMarkdownLink } from "./links";
 import { AnnotationIndex, MARK_COLORS, MarkStyle, newAnnotation, newPageNote, NormalizedRect, PdfAnnotation } from "./model";
 import { annotationTarget, comparableFileName, QuoteAnnotationRecord, quoteAnnotations } from "./legacy";
 import { loadPdf } from "./pdf-runtime";
-import { filterOutlineEntries, outlineDestinationOffset, ResolvedOutlineEntry, resolvePdfOutline } from "./outline";
+import {
+  cacheOutlineHeadingLocation,
+  filterOutlineEntries,
+  findExactOutlineHeading,
+  outlineDestinationOffset,
+  ResolvedOutlineEntry,
+  resolvePdfOutline,
+} from "./outline";
 import { DocumentBundle, LegacyAnnotationRecord, loadLegacyAnnotations, openBundle } from "./storage";
 
 export const LUMEN_VIEW_TYPE = "lumen-pdf-view";
@@ -46,6 +53,9 @@ const MOBILE_MARK_RECTS_PER_FRAME = 600;
 const MOBILE_MARK_RECTS_PER_SCROLL_FRAME = 120;
 const MOBILE_MAX_SEARCH_RECTS_PER_PAGE = 180;
 const MOBILE_MAX_SEARCH_RESULT_CARDS = 80;
+const OUTLINE_PRIORITY_VALIDATION_LIMIT = 12;
+const OUTLINE_BACKGROUND_ENTRY_LIMIT = 48;
+const OUTLINE_REFINEMENT_PAUSE_MS = 12;
 
 interface ObsidianMobilePlatformMetrics {
   mobileDeviceHeight?: number;
@@ -237,6 +247,8 @@ export class LumenPdfView extends FileView {
   private outlineButton: HTMLButtonElement | null = null;
   private outlineEntries: ResolvedOutlineEntry[] = [];
   private outlineFilterTimer = 0;
+  private outlineRenderRaf = 0;
+  private readonly outlineValidationTasks = new Map<string, Promise<void>>();
   private themeButton: HTMLButtonElement | null = null;
   private inspector!: HTMLElement;
   private inspectorList!: HTMLElement;
@@ -749,9 +761,83 @@ export class LumenPdfView extends FileView {
         this.outlineButton.hidden = this.outlineEntries.length === 0;
         this.outlineButton.setAttribute("aria-label", `Table of contents, ${this.outlineEntries.length} headings`);
       }
+      if (this.outlineEntries.length) void this.refineOutlineEntries(generation);
     } catch (error) {
       if (generation === this.documentGeneration) console.warn("Lumen could not load the PDF table of contents", error);
     }
+  }
+
+  private prioritizedOutlineEntries(): ResolvedOutlineEntry[] {
+    const topLevel = this.outlineEntries.filter(entry => entry.depth === 0);
+    if (!topLevel.length) return [];
+    // Generated PDFs commonly leave front-matter destinations and the final
+    // bibliography stale. Visit the last entry first, then alternate the
+    // beginning and end without ever exceeding the fixed validation budget.
+    const prioritized: ResolvedOutlineEntry[] = [];
+    let first = 0;
+    let last = topLevel.length - 1;
+    while (first <= last && prioritized.length < OUTLINE_PRIORITY_VALIDATION_LIMIT) {
+      if (last >= first) prioritized.push(topLevel[last--]);
+      if (first <= last && prioritized.length < OUTLINE_PRIORITY_VALIDATION_LIMIT) prioritized.push(topLevel[first++]);
+    }
+    return prioritized;
+  }
+
+  private async refineOutlineEntries(generation: number): Promise<void> {
+    const priority = this.prioritizedOutlineEntries();
+    for (const entry of priority) {
+      if (generation !== this.documentGeneration) return;
+      await this.validateOutlineEntry(entry, generation);
+      await new Promise<void>(resolve => window.setTimeout(resolve, OUTLINE_REFINEMENT_PAUSE_MS));
+    }
+    // Small and ordinary outlines can be completed cooperatively. Large
+    // outlines remain lazy after their most useful top-level destinations so
+    // a pathological table of contents cannot turn into a document scan.
+    if (this.outlineEntries.length > OUTLINE_BACKGROUND_ENTRY_LIMIT) return;
+    const priorityIds = new Set(priority.map(entry => entry.id));
+    for (const entry of this.outlineEntries) {
+      if (generation !== this.documentGeneration) return;
+      if (!priorityIds.has(entry.id)) await this.validateOutlineEntry(entry, generation);
+      await new Promise<void>(resolve => window.setTimeout(resolve, OUTLINE_REFINEMENT_PAUSE_MS));
+    }
+  }
+
+  private validateOutlineEntry(entry: ResolvedOutlineEntry, generation: number): Promise<void> {
+    if (entry.validation !== "unresolved") return Promise.resolve();
+    const pending = this.outlineValidationTasks.get(entry.id);
+    if (pending) return pending;
+    const document = this.pdfDocument;
+    if (!document) return Promise.resolve();
+    const task = (async () => {
+      const location = await findExactOutlineHeading(
+        entry.title,
+        entry.declaredPageNumber,
+        document.numPages,
+        async pageNumber => {
+          if (generation !== this.documentGeneration || document !== this.pdfDocument) return null;
+          try {
+            return await this.getSearchablePageText(pageNumber);
+          } catch {
+            return null;
+          }
+        },
+      );
+      if (generation !== this.documentGeneration || document !== this.pdfDocument) return;
+      cacheOutlineHeadingLocation(entry, location);
+      this.scheduleOutlineRender();
+    })().finally(() => {
+      if (this.outlineValidationTasks.get(entry.id) === task) this.outlineValidationTasks.delete(entry.id);
+    });
+    this.outlineValidationTasks.set(entry.id, task);
+    return task;
+  }
+
+  private scheduleOutlineRender(): void {
+    if (!this.outlinePanel?.classList.contains("is-open") || this.outlineRenderRaf) return;
+    this.outlineRenderRaf = window.requestAnimationFrame(() => {
+      this.outlineRenderRaf = 0;
+      this.renderOutline();
+    });
   }
 
   private renderOutline(): void {
@@ -770,7 +856,6 @@ export class LumenPdfView extends FileView {
           role: "treeitem",
           "aria-level": String(entry.depth + 1),
           "aria-label": `${entry.title}, PDF page ${entry.pageNumber}`,
-          title: entry.title,
         },
       });
       button.style.setProperty("--lumen-outline-indent", `${Math.min(entry.depth, 12) * 14}px`);
@@ -788,25 +873,46 @@ export class LumenPdfView extends FileView {
   private async navigateToOutlineEntry(entry: ResolvedOutlineEntry): Promise<void> {
     const generation = this.documentGeneration;
     const document = this.pdfDocument;
-    const state = this.pages.get(entry.pageNumber);
-    if (!document || !state) return;
+    if (!document) return;
     try {
-      const page = state.page ?? await document.getPage(entry.pageNumber);
+      // Entries outside the bounded background pass are validated on demand.
+      // This also joins an in-flight proactive check rather than extracting the
+      // same nearby pages twice when the user clicks quickly after opening.
+      await this.validateOutlineEntry(entry, generation);
+      if (generation !== this.documentGeneration || document !== this.pdfDocument) return;
+      const pageNumber = entry.pageNumber;
+      const state = this.pages.get(pageNumber);
+      if (!state) return;
+      const page = state.page ?? await document.getPage(pageNumber);
       if (generation !== this.documentGeneration || document !== this.pdfDocument) return;
       const viewport = page.getViewport({ scale: this.zoom });
       state.page = page;
       this.sizePage(state, viewport.width / this.zoom, viewport.height / this.zoom);
       const offset = outlineDestinationOffset(entry.destination, viewport);
-      this.currentPage = entry.pageNumber;
-      this.pageInput.value = String(entry.pageNumber);
+      this.currentPage = pageNumber;
+      this.pageInput.value = String(pageNumber);
       const rootRect = this.scrollEl.getBoundingClientRect();
       const shellRect = state.shell.getBoundingClientRect();
       const toolbarBottom = this.toolbarEl.getBoundingClientRect().bottom - rootRect.top;
       const clearance = Math.max(14, toolbarBottom + 8);
-      const top = this.scrollEl.scrollTop + shellRect.top - rootRect.top + Math.min(offset.top, shellRect.height) - clearance;
-      const left = this.scrollEl.scrollLeft + shellRect.left - rootRect.left + Math.min(offset.left, shellRect.width) - 14;
+      const requestedOffset = entry.heading
+        ? entry.heading.topRatio * shellRect.height
+        : Math.min(offset.top, shellRect.height);
+      // Keep enough of the target page in view to provide context. In
+      // particular, a stale XYZ destination near the bottom must not align the
+      // page's last lines with the top edge and make the next page look active.
+      const visiblePageContext = Math.min(
+        shellRect.height,
+        Math.max(180, this.scrollEl.clientHeight * .55),
+      );
+      const framedOffset = Math.min(
+        Math.max(0, requestedOffset),
+        Math.max(0, shellRect.height - visiblePageContext),
+      );
+      const contextAnchor = Math.max(clearance, Math.min(160, this.scrollEl.clientHeight * .18));
+      const top = this.scrollEl.scrollTop + shellRect.top - rootRect.top + framedOffset - contextAnchor;
       if (this.mobileRuntime) this.toggleOutline();
-      this.scrollEl.scrollTo({ top: Math.max(0, top), left: Math.max(0, left), behavior: "smooth" });
+      this.scrollEl.scrollTo({ top: Math.max(0, top), left: this.scrollEl.scrollLeft, behavior: "smooth" });
     } catch (error) {
       if (generation === this.documentGeneration) console.warn(`Lumen could not open PDF heading on page ${entry.pageNumber}`, error);
     }
@@ -3117,6 +3223,7 @@ export class LumenPdfView extends FileView {
     this.queuedPageMounts.clear();
     window.cancelAnimationFrame(this.currentPageRaf);
     window.cancelAnimationFrame(this.inspectorRaf);
+    window.cancelAnimationFrame(this.outlineRenderRaf);
     window.clearTimeout(this.scrollIdleTimer);
     window.clearTimeout(this.pagePreviewTimer);
     window.clearTimeout(this.pageDetailTimer);
@@ -3133,6 +3240,8 @@ export class LumenPdfView extends FileView {
     this.mobileResizeTimer = 0;
     this.mobileKeyboardProbeTimer = 0;
     this.outlineFilterTimer = 0;
+    this.outlineRenderRaf = 0;
+    this.outlineValidationTasks.clear();
     this.mobileKeyboardProbeCount = 0;
     this.pageDetailReadyAt = 0;
     this.isScrolling = false;

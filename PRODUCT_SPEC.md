@@ -24,6 +24,10 @@ or Git history from another annotator plugin.
   light, sepia, and dark document themes.
 - Compact controls use Obsidian's accent colour for active state and neutral
   content text.
+- When the PDF provides a navigable outline, show a compact toolbar icon for a
+  searchable floating table of contents with nested heading indentation, muted
+  physical page numbers, and exact named/direct destination navigation. Keep
+  the icon hidden when no navigable outline exists.
 
 ## PDF search
 

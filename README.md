@@ -10,6 +10,7 @@ Lumen is a PDF reader for research-heavy vaults on desktop, phone, and tablet. I
 
 - A compact floating toolbar with direct page entry, nearby previous/next controls, zoom, search, annotations, and light/sepia/dark themes.
 - An immediate selection palette—no hover step—where choosing a colour prepares the mark and choosing its type applies it. Seven mark types are included: highlight, underline, dashed underline, dotted underline, strike-through, box, and comment.
+- A searchable table of contents appears only when the PDF provides an outline, preserves nested hierarchy, shows muted physical page numbers, and opens exact within-page destinations.
 - A floating PDF search that shows long, left-aligned excerpts so results make sense before you open them.
 - A virtualized annotation inspector with bright colour edges, readable quotes, notes, and one-click navigation.
 - A full editor for each saved mark, including colour, style, note, tags, copy, and delete.
@@ -38,6 +39,7 @@ Lumen was built around large documents and dense annotation sets rather than opt
 - The inspector mounts only the visible card window plus overscan. Its default newest/oldest views request that window directly from a recency index instead of rebuilding the full logical collection after every edit.
 - Full-document search yields to Obsidian every six pages, can be cancelled, bounds retained results and mounted cards, and uses a bounded least-recently-used page-text cache.
 - Selection capture and current-page tracking use page-range/binary lookup rather than walking every page, while hidden search and inspector panels release their result DOM.
+- PDF outlines load after the reader is ready; named destinations and page references are cached, resolved with bounded concurrency, and yielded in batches so even unusually large outlines do not monopolize the UI thread.
 - Snapshot restore, annotation journals, and compact checkpoint serialization yield in bounded batches so six-figure loads and saves do not monopolize the UI thread. Closing or switching a PDF flushes only recent journal changes rather than rebuilding the entire snapshot.
 - Stable PDF metadata caches the content hash so unchanged large files are not re-hashed on every open. Optional recovery copies run in the background and are disabled by default to avoid cloud-vault sync pressure.
 - Each open PDF receives its own bundled, version-matched PDF.js worker.
@@ -90,7 +92,7 @@ Lumen supports Obsidian 1.13.7 or newer on desktop, iOS, and Android.
 
 ## Use
 
-Open any PDF after enabling Lumen. The PDF search and annotation inspector begin closed every time a document opens.
+Open any PDF after enabling Lumen. The PDF search, table of contents, and annotation inspector begin closed every time a document opens. When the PDF supplies a navigable outline, the toolbar shows a table-of-contents icon; its floating panel filters heading titles, preserves the PDF hierarchy, and jumps to the heading's exact destination. PDFs without an outline keep the button hidden. The current theme is shown as one compact icon whose menu contains Light, Sepia, and Dark.
 
 Select text to open the compact markup palette. Choose a colour first, then choose a mark type to apply it immediately—there is no separate confirmation step. Choosing the comment type also opens the individual editor so you can add its note. Nothing is saved merely by choosing a swatch. Click an existing mark or its inspector card to open the individual editor. Use the sticky-note icon or **Place a page note** command to place a note anywhere on a page. PDF search marks every exact match on the rendered page, upgrades visible results to PDF.js's exact text-range geometry at every zoom level, and strengthens the selected result. The toolbar's theme controls affect the reading surface and editor together; the chosen theme persists and Lumen button text and icons follow your Obsidian accent colour in every PDF theme.
 

@@ -2,6 +2,15 @@
 
 All notable changes to Lumen PDF Annotator are documented here.
 
+## 1.0.15 — 2026-09-21
+
+- Added a floating, searchable table of contents for PDFs that provide an outline, with source hierarchy indentation and muted physical page numbers that match the editor toolbar.
+- Resolved direct and named PDF destinations to their exact page and within-page coordinates, including XYZ, FitH, FitV, and FitR destinations.
+- Corrected stale outline destinations by checking for the exact heading on the declared page and a bounded nearby range; navigation keeps the target page in view and falls back to the PDF destination when no exact heading is found.
+- Kept the outline button hidden for PDFs without a navigable outline and made search, outline, and annotation panels coordinate cleanly on desktop and mobile.
+- Replaced the three theme buttons with one compact current-theme icon and a Light, Sepia, and Dark menu.
+- Deferred outline loading until the reader is ready, with cached page resolution, bounded concurrency, cooperative yielding, and deferred row rendering for large outlines.
+
 ## 1.0.12 — 2026-09-02
 
 - Enabled installation on iOS and Android without changing the established desktop reader path.

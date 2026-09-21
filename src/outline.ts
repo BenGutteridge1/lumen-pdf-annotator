@@ -7,8 +7,35 @@ export interface ResolvedOutlineEntry {
   id: string;
   title: string;
   depth: number;
+  /** The page encoded in the PDF outline, retained when validation fails. */
+  declaredPageNumber: number;
   pageNumber: number;
   destination: readonly unknown[];
+  heading?: OutlineHeadingGeometry;
+  validation: "unresolved" | "matched" | "unmatched";
+}
+
+export interface OutlineHeadingGeometry {
+  leftRatio: number;
+  topRatio: number;
+  widthRatio: number;
+  heightRatio: number;
+}
+
+export interface OutlineSearchTextSpan {
+  start: number;
+  end: number;
+  rect: { x: number; y: number; width: number; height: number };
+}
+
+export interface OutlineSearchPage {
+  text: string;
+  spans: readonly OutlineSearchTextSpan[];
+}
+
+export interface OutlineHeadingLocation {
+  pageNumber: number;
+  heading: OutlineHeadingGeometry;
 }
 
 export interface OutlineViewport {
@@ -124,7 +151,15 @@ export async function resolvePdfOutline(
       const destination = await explicitDestination(candidate.destination);
       if (destination) {
         const pageNumber = await pageNumberFor(destination);
-        if (pageNumber) resolved[index] = { ...candidate, pageNumber, destination };
+        if (pageNumber) {
+          resolved[index] = {
+            ...candidate,
+            declaredPageNumber: pageNumber,
+            pageNumber,
+            destination,
+            validation: "unresolved",
+          };
+        }
       }
       // Explicit destinations and cached page references can resolve entirely
       // through microtasks. Yield periodically so pathological outlines do not
@@ -137,6 +172,114 @@ export async function resolvePdfOutline(
   // Keep the source depth even if a structural parent has no destination of
   // its own. Flattening those gaps would misrepresent the PDF's hierarchy.
   return resolved.filter((entry): entry is ResolvedOutlineEntry => entry !== null);
+}
+
+/**
+ * Return the small, deterministic neighbourhood used to validate an outline
+ * destination. Forward pages win ties because stale generated outlines most
+ * commonly lag behind inserted front matter.
+ */
+export function outlineValidationPageOrder(
+  declaredPageNumber: number,
+  pageCount: number,
+  radius = 4,
+): number[] {
+  if (pageCount < 1 || declaredPageNumber < 1 || declaredPageNumber > pageCount) return [];
+  const pages = [declaredPageNumber];
+  for (let distance = 1; distance <= Math.max(0, Math.floor(radius)); distance++) {
+    const forward = declaredPageNumber + distance;
+    const backward = declaredPageNumber - distance;
+    if (forward <= pageCount) pages.push(forward);
+    if (backward >= 1) pages.push(backward);
+  }
+  return pages;
+}
+
+function titleBoundaryCharacter(value: string | undefined): boolean {
+  return value !== undefined && /[\p{L}\p{N}]/u.test(value);
+}
+
+function geometryForRange(
+  spans: readonly OutlineSearchTextSpan[],
+  start: number,
+  end: number,
+): { geometry: OutlineHeadingGeometry; textHeight: number } | null {
+  const matching = spans.filter(span => span.end > start && span.start < end);
+  if (!matching.length) return null;
+  const left = Math.min(...matching.map(span => span.rect.x));
+  const top = Math.min(...matching.map(span => span.rect.y));
+  const right = Math.max(...matching.map(span => span.rect.x + span.rect.width));
+  const bottom = Math.max(...matching.map(span => span.rect.y + span.rect.height));
+  const textHeight = Math.max(...matching.map(span => span.rect.height));
+  return {
+    geometry: {
+      leftRatio: Math.max(0, Math.min(1, left)),
+      topRatio: Math.max(0, Math.min(1, top)),
+      widthRatio: Math.max(0, Math.min(1, right) - Math.max(0, Math.min(1, left))),
+      heightRatio: Math.max(0, Math.min(1, bottom) - Math.max(0, Math.min(1, top))),
+    },
+    textHeight,
+  };
+}
+
+/** Locate a boundary-exact heading title and return scale-independent geometry. */
+export function exactOutlineHeadingGeometry(
+  page: OutlineSearchPage,
+  title: string,
+): OutlineHeadingGeometry | null {
+  const needle = normalizedTitle(title).toLocaleLowerCase();
+  if (!needle) return null;
+  const haystack = page.text.toLocaleLowerCase();
+  let from = 0;
+  let best: { geometry: OutlineHeadingGeometry; textHeight: number } | null = null;
+  while (from <= haystack.length - needle.length) {
+    const start = haystack.indexOf(needle, from);
+    if (start < 0) break;
+    const end = start + needle.length;
+    const startsInsideWord = titleBoundaryCharacter(needle[0]) && titleBoundaryCharacter(haystack[start - 1]);
+    const endsInsideWord = titleBoundaryCharacter(needle.at(-1)) && titleBoundaryCharacter(haystack[end]);
+    if (!startsInsideWord && !endsInsideWord) {
+      const candidate = geometryForRange(page.spans, start, end);
+      if (candidate && (!best
+        || candidate.textHeight > best.textHeight
+        || (candidate.textHeight === best.textHeight && candidate.geometry.topRatio < best.geometry.topRatio))) {
+        best = candidate;
+      }
+    }
+    from = start + Math.max(1, needle.length);
+  }
+  return best?.geometry ?? null;
+}
+
+/** Search only the declared page and its bounded neighbourhood. */
+export async function findExactOutlineHeading(
+  title: string,
+  declaredPageNumber: number,
+  pageCount: number,
+  readPage: (pageNumber: number) => Promise<OutlineSearchPage | null>,
+): Promise<OutlineHeadingLocation | null> {
+  for (const pageNumber of outlineValidationPageOrder(declaredPageNumber, pageCount)) {
+    const page = await readPage(pageNumber);
+    if (!page) continue;
+    const heading = exactOutlineHeadingGeometry(page, title);
+    if (heading) return { pageNumber, heading };
+  }
+  return null;
+}
+
+/** Cache a successful refinement; a miss deliberately preserves the PDF metadata. */
+export function cacheOutlineHeadingLocation(
+  entry: ResolvedOutlineEntry,
+  location: OutlineHeadingLocation | null,
+): boolean {
+  if (!location) {
+    entry.validation = "unmatched";
+    return false;
+  }
+  entry.pageNumber = location.pageNumber;
+  entry.heading = location.heading;
+  entry.validation = "matched";
+  return true;
 }
 
 export function filterOutlineEntries(
