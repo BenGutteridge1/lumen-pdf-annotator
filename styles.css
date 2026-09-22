@@ -20,6 +20,17 @@
 .lumen-reader * {
   box-sizing: border-box;
 }
+.lumen-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
 .lumen-scroll {
   position: absolute;
   inset: 0;
@@ -331,6 +342,11 @@
   font-size: 12px;
   text-align: left;
 }
+.lumen-outline-search-label {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+}
 .lumen-search-results,
 .lumen-outline-list,
 .lumen-inspector-list {
@@ -342,8 +358,8 @@
 }
 .lumen-outline-item {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
+  grid-template-columns: minmax(0, 1fr) max-content;
+  align-items: start;
   gap: 10px;
   width: 100%;
   min-height: 34px;
@@ -351,20 +367,26 @@
   padding: 6px 10px 6px calc(10px + var(--lumen-outline-indent, 0px));
   border-radius: 8px;
   text-align: left;
+  white-space: normal;
   content-visibility: auto;
   contain-intrinsic-size: auto 34px;
 }
 .lumen-outline-title {
+  display: block;
   min-width: 0;
   color: var(--lumen-text);
   font-size: 12px;
   line-height: 1.35;
+  white-space: normal;
   overflow-wrap: anywhere;
 }
 .lumen-outline-page {
+  justify-self: end;
+  padding-top: 2px;
   color: var(--lumen-muted);
   font-size: 10px;
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 .lumen-outline-button[hidden] {
   display: none;

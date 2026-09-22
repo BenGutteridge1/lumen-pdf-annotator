@@ -41,12 +41,12 @@ interface ViewRegistryWithExtensions {
 
 export default class LumenPdfPlugin extends Plugin {
   settings: LumenSettings = DEFAULT_SETTINGS;
-  private settingsWrite: Promise<void> = Promise.resolve();
+  private dataWrite: Promise<void> = Promise.resolve();
   private viewState!: PdfViewStateManager;
 
   async onload(): Promise<void> {
     this.settings = readSettings(await this.loadData() as unknown);
-    this.viewState = new PdfViewStateManager(this);
+    this.viewState = new PdfViewStateManager(this, state => this.saveMergedData({ pdfViewState: state }));
     await this.viewState.load();
     this.registerView(LUMEN_VIEW_TYPE, leaf => new LumenPdfView(
       leaf,
@@ -57,6 +57,7 @@ export default class LumenPdfPlugin extends Plugin {
       }),
       this.settings.legacyAnnotationFolder,
       this.settings.automaticPdfBackups,
+      () => this.viewState.attach(leaf),
     ));
     if (this.settings.defaultViewer) this.installAsDefaultPdfViewer();
     this.registerObsidianProtocolHandler(LUMEN_PROTOCOL_ACTION, params => void this.openAnnotationLink(params).catch(error => {
@@ -185,9 +186,18 @@ export default class LumenPdfPlugin extends Plugin {
   }
 
   saveSettings(): Promise<void> {
-    const snapshot = { ...this.settings };
-    const write = this.settingsWrite.catch(() => undefined).then(() => this.saveData(snapshot));
-    this.settingsWrite = write;
+    return this.saveMergedData({ ...this.settings });
+  }
+
+  private saveMergedData(patch: Record<string, unknown>): Promise<void> {
+    const write = this.dataWrite.catch(() => undefined).then(async () => {
+      const loaded: unknown = await this.loadData() as unknown;
+      const existing = typeof loaded === "object" && loaded !== null && !Array.isArray(loaded)
+        ? loaded as Record<string, unknown>
+        : {};
+      await this.saveData({ ...existing, ...patch });
+    });
+    this.dataWrite = write;
     return write;
   }
 
