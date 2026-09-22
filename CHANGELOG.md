@@ -2,6 +2,12 @@
 
 All notable changes to Lumen PDF Annotator are documented here.
 
+## 1.0.16 — 2026-09-22
+
+- Wrapped long table-of-contents headings while reserving their page-number column.
+- Removed the table-of-contents hover tooltips while keeping its search, close control, and heading rows accessible.
+- Restored the saved PDF page only after its reader is ready and visible, including cold starts that open another note in a new tab. Reader-position and settings writes now share a serialized, merged save path so one cannot erase the other.
+
 ## 1.0.15 — 2026-09-21
 
 - Added a floating, searchable table of contents for PDFs that provide an outline, with source hierarchy indentation and muted physical page numbers that match the editor toolbar.

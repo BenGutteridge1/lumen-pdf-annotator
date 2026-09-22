@@ -27,7 +27,9 @@ or Git history from another annotator plugin.
 - When the PDF provides a navigable outline, show a compact toolbar icon for a
   searchable floating table of contents with nested heading indentation, muted
   physical page numbers, and exact named/direct destination navigation. Keep
-  the icon hidden when no navigable outline exists.
+  the icon hidden when no navigable outline exists. Wrap long heading titles
+  without obscuring page numbers, and restore saved reader position when a
+  background PDF tab becomes visible after startup.
 
 ## PDF search
 

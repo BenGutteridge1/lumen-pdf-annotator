@@ -170,6 +170,8 @@ function iconButton(icon: string, label: string, onClick: () => void): HTMLButto
   return button;
 }
 
+let outlineHeadingSequence = 0;
+
 function normalizeSearchText(value: string): NormalizedSearchText {
   let text = "";
   const charStarts: number[] = [];
@@ -296,6 +298,7 @@ export class LumenPdfView extends FileView {
   private inspectorCacheKey = "";
   private inspectorCache: PdfAnnotation[] = [];
   private documentGeneration = 0;
+  private readerReady = false;
   private pageInput!: HTMLInputElement;
   private pageTotal!: HTMLElement;
   private zoomLabel!: HTMLElement;
@@ -320,6 +323,7 @@ export class LumenPdfView extends FileView {
     private readonly onThemeChange?: (theme: PdfTheme) => void,
     private readonly legacyAnnotationFolder = "PDF annotations",
     private readonly automaticPdfBackups = false,
+    private readonly onReaderReady?: () => void,
   ) {
     super(leaf);
     this.theme = initialTheme;
@@ -423,6 +427,9 @@ export class LumenPdfView extends FileView {
     this.buildShell(file);
     await this.buildPages(generation);
     if (generation !== this.documentGeneration) return;
+    this.readerReady = true;
+    try { this.onReaderReady?.(); }
+    catch (error) { console.warn("Lumen could not initialize PDF view state", error); }
     const index = await indexPromise;
     if (generation !== this.documentGeneration) return;
     this.bundle = bundle;
@@ -504,7 +511,7 @@ export class LumenPdfView extends FileView {
   }
 
   /** Restore lightweight view state without exposing the renderer internals. */
-  restorePage(page: number): void { this.goToPage(page); }
+  restorePage(page: number): void { this.goToPage(page, "instant"); }
   restoreZoom(zoom: number, mobileFit = false): Promise<void> {
     if (this.mobileRuntime) {
       this.mobileFitMode = mobileFit;
@@ -515,6 +522,7 @@ export class LumenPdfView extends FileView {
     return this.setZoom(zoom);
   }
   isMobileView(): boolean { return this.mobileRuntime; }
+  isReaderReady(): boolean { return this.readerReady; }
   usesMobileFit(): boolean { return this.mobileRuntime && this.mobileFitMode; }
   minimumZoom(): number { return this.mobileRuntime ? 0.25 : 0.5; }
 
@@ -699,6 +707,8 @@ export class LumenPdfView extends FileView {
     const actions = this.toolbarEl.createDiv({ cls: "lumen-toolbar-actions" });
     actions.append(iconButton("search", "Search PDF", () => this.toggleSearch()));
     this.outlineButton = iconButton("list-tree", "Table of contents", () => this.toggleOutline());
+    this.outlineButton.removeAttribute("aria-label");
+    this.outlineButton.createSpan({ cls: "lumen-visually-hidden", text: "Table of contents" });
     this.outlineButton.addClass("lumen-outline-button");
     this.outlineButton.hidden = true;
     this.outlineButton.setAttribute("aria-pressed", "false");
@@ -733,14 +743,21 @@ export class LumenPdfView extends FileView {
   }
 
   private buildOutlinePanel(): void {
-    this.outlinePanel.setAttribute("aria-label", "PDF table of contents");
+    const headingId = `lumen-outline-heading-${++outlineHeadingSequence}`;
+    this.outlinePanel.setAttribute("role", "region");
+    this.outlinePanel.setAttribute("aria-labelledby", headingId);
     const header = this.outlinePanel.createDiv({ cls: "lumen-panel-header" });
-    header.createSpan({ text: "Table of contents" });
-    header.append(iconButton("x", "Close table of contents", () => this.toggleOutline()));
+    header.createSpan({ text: "Table of contents", attr: { id: headingId } });
+    const close = iconButton("x", "Close table of contents", () => this.toggleOutline());
+    close.removeAttribute("aria-label");
+    close.createSpan({ cls: "lumen-visually-hidden", text: "Close table of contents" });
+    header.append(close);
     const inputWrap = this.outlinePanel.createDiv({ cls: "lumen-search-input-wrap" });
     setIcon(inputWrap.createSpan(), "search");
-    this.outlineInput = inputWrap.createEl("input", {
-      attr: { type: "search", placeholder: "Filter headings", "aria-label": "Filter table of contents" },
+    const label = inputWrap.createEl("label", { cls: "lumen-outline-search-label" });
+    label.createSpan({ cls: "lumen-visually-hidden", text: "Filter table of contents" });
+    this.outlineInput = label.createEl("input", {
+      attr: { type: "search", placeholder: "Filter headings" },
     });
     this.outlineList = this.outlinePanel.createDiv({ cls: "lumen-outline-list", attr: { role: "tree" } });
     this.outlineInput.addEventListener("input", () => {
@@ -759,7 +776,8 @@ export class LumenPdfView extends FileView {
       if (generation !== this.documentGeneration || document !== this.pdfDocument) return;
       if (this.outlineButton) {
         this.outlineButton.hidden = this.outlineEntries.length === 0;
-        this.outlineButton.setAttribute("aria-label", `Table of contents, ${this.outlineEntries.length} headings`);
+        const name = this.outlineButton.querySelector<HTMLElement>(".lumen-visually-hidden");
+        if (name) name.textContent = `Table of contents, ${this.outlineEntries.length} headings`;
       }
       if (this.outlineEntries.length) void this.refineOutlineEntries(generation);
     } catch (error) {
@@ -855,7 +873,6 @@ export class LumenPdfView extends FileView {
         attr: {
           role: "treeitem",
           "aria-level": String(entry.depth + 1),
-          "aria-label": `${entry.title}, PDF page ${entry.pageNumber}`,
         },
       });
       button.style.setProperty("--lumen-outline-indent", `${Math.min(entry.depth, 12) * 14}px`);
@@ -863,7 +880,6 @@ export class LumenPdfView extends FileView {
       button.createSpan({
         cls: "lumen-outline-page",
         text: `p. ${entry.pageNumber}`,
-        attr: { "aria-hidden": "true" },
       });
       button.addEventListener("click", () => void this.navigateToOutlineEntry(entry));
     }
@@ -1731,7 +1747,7 @@ export class LumenPdfView extends FileView {
     this.pumpPageMounts();
   }
 
-  private goToPage(page: number): void {
+  private goToPage(page: number, behavior: ScrollBehavior = "smooth"): void {
     if (!this.pdfDocument) return;
     const target = clamp(Math.round(page), 1, this.pdfDocument.numPages);
     const shell = this.pages.get(target)?.shell;
@@ -1740,7 +1756,7 @@ export class LumenPdfView extends FileView {
     this.pageInput.value = String(target);
     const rootRect = this.scrollEl.getBoundingClientRect();
     const targetTop = this.scrollEl.scrollTop + shell.getBoundingClientRect().top - rootRect.top - 14;
-    this.scrollEl.scrollTo({ top: Math.max(0, targetTop), behavior: "smooth" });
+    this.scrollEl.scrollTo({ top: Math.max(0, targetTop), behavior });
   }
 
   private captureSelection(clientX?: number, clientY?: number): void {
@@ -3217,6 +3233,7 @@ export class LumenPdfView extends FileView {
 
   private async teardownDocument(invalidate = true): Promise<void> {
     if (invalidate) this.documentGeneration++;
+    this.readerReady = false;
     this.observer?.disconnect();
     this.observer = null;
     this.pendingPageMounts.length = 0;
