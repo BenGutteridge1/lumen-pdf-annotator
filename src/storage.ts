@@ -1,5 +1,6 @@
 import { normalizePath, TFile, Vault } from "obsidian";
 import { AnnotationIndex, AnnotationMutation, MARK_COLORS, MarkStyle, PdfAnnotation } from "./model";
+import { writeAnnotationExport } from "./annotation-export";
 
 const ROOT = ".lumen-pdf/bundles/sha256";
 const LEGACY_ROOT = ".pdf-annotator/bundles/sha256";
@@ -17,6 +18,12 @@ export interface BundleInfo {
   hash: string;
   folder: string;
   backupPath: string;
+  manifest: BundleManifest;
+}
+
+export interface AnnotationBundleInfo {
+  hash: string;
+  folder: string;
   manifest: BundleManifest;
 }
 
@@ -98,47 +105,6 @@ async function ensureFolder(vault: Vault, path: string): Promise<void> {
     current = current ? `${current}/${part}` : part;
     if (!(await vault.adapter.exists(current))) await vault.adapter.mkdir(current);
   }
-}
-
-async function snapshotMarkdown(annotations: PdfAnnotation[], pdfPath: string, hash: string): Promise<string> {
-  const groups = new Map<string, PdfAnnotation[]>();
-  for (const annotation of annotations) {
-    const groupId = annotation.groupId || annotation.id;
-    let members = groups.get(groupId);
-    if (!members) groups.set(groupId, members = []);
-    members.push(annotation);
-  }
-  const sorted = Array.from(groups.entries()).map(([groupId, members]) => ({
-    annotation: members.find(item => item.id === groupId) ?? members[0],
-    pages: Array.from(new Set(members.map(item => item.page))).sort((a, b) => a - b),
-  })).sort((a, b) => a.pages[0] - b.pages[0] || a.annotation.createdAt - b.annotation.createdAt);
-  const chronological = [...annotations].sort((a, b) => a.updatedAt - b.updatedAt || a.createdAt - b.createdAt || a.id.localeCompare(b.id));
-  const lines = [
-    "---",
-    "lumen-pdf-annotations: true",
-    `pdf: ${JSON.stringify(pdfPath)}`,
-    `sha256: ${hash}`,
-    `updated: ${new Date().toISOString()}`,
-    "---",
-    "",
-    "# PDF annotations",
-    "",
-  ];
-  for (let index = 0; index < sorted.length; index++) {
-    const { annotation: item, pages } = sorted[index];
-    const pageLabel = pages.length === 1 ? `Page ${pages[0]}` : `Pages ${pages.join(", ")}`;
-    lines.push(`## ${pageLabel}`, "", `> ${item.quote.replaceAll("\n", " ")}`, "");
-    if (item.note) lines.push(item.note, "");
-    if (item.tags.length) lines.push(`Tags: ${item.tags.map(tag => `#${tag}`).join(" ")}`, "");
-    if (index > 0 && index % 750 === 0) await new Promise<void>(resolve => window.setTimeout(resolve, 0));
-  }
-  lines.push("```json lumen-pdf-data", "[");
-  for (let index = 0; index < chronological.length; index++) {
-    lines.push(`${JSON.stringify(chronological[index])}${index + 1 < chronological.length ? "," : ""}`);
-    if (index > 0 && index % 750 === 0) await new Promise<void>(resolve => window.setTimeout(resolve, 0));
-  }
-  lines.push("]", "```", "");
-  return lines.join("\n");
 }
 
 function yieldToHost(): Promise<void> {
@@ -420,11 +386,17 @@ export class AnnotationRepository {
     }
   }
 
-  async exportTo(path: string, index: AnnotationIndex): Promise<void> {
-    await this.checkpoint(index);
-    const parent = normalizePath(path).split("/").slice(0, -1).join("/");
-    if (parent) await ensureFolder(this.vault, parent);
-    await this.vault.adapter.write(path, await snapshotMarkdown(index.all(), this.pdfPath, this.hash));
+  async exportReadable(index: AnnotationIndex, originalName: string): Promise<string> {
+    await this.flushJournal();
+    const folder = ".lumen-pdf/exports";
+    await ensureFolder(this.vault, folder);
+    const stem = originalName.replace(/\.pdf$/i, "").replace(/[\\/:*?"<>|]/g, "-").trim().slice(0, 90) || "PDF";
+    const time = new Date().toISOString().replace(/[:.]/g, "-");
+    const base = `${folder}/${stem}-${this.hash.slice(0, 12)}-${time}`;
+    let path = `${base}.annotations.md`;
+    for (let copy = 2; await this.vault.adapter.exists(path); copy++) path = `${base}-${copy}.annotations.md`;
+    await writeAnnotationExport(this.vault, path, index, this.pdfPath);
+    return path;
   }
 }
 
@@ -489,6 +461,44 @@ export async function listBundles(vault: Vault): Promise<BundleInfo[]> {
     } catch { /* a malformed bundle is reported by verification only when discoverable */ }
   }
   return bundles.sort((a, b) => b.manifest.updatedAt.localeCompare(a.manifest.updatedAt));
+}
+
+/** Discover annotation storage without reading or hashing the source PDFs. */
+export async function listAnnotationBundles(vault: Vault): Promise<AnnotationBundleInfo[]> {
+  const bundles: AnnotationBundleInfo[] = [];
+  const seen = new Set<string>();
+  for (const root of [ROOT, LEGACY_ROOT]) {
+    if (!(await vault.adapter.exists(root))) continue;
+    const folders = (await vault.adapter.list(root)).folders;
+    for (let offset = 0; offset < folders.length; offset += 1) {
+      const folder = folders[offset];
+      const hash = folder.split("/").at(-1) ?? "";
+      if (!/^[a-f0-9]{64}$/.test(hash) || seen.has(hash)) continue;
+      const manifestPath = `${folder}/manifest.json`;
+      if (!(await vault.adapter.exists(manifestPath))) continue;
+      const hasAnnotations = await vault.adapter.exists(`${folder}/annotations.snapshot.json`)
+        || await vault.adapter.exists(`${folder}/annotations.snapshot.previous.json`)
+        || await vault.adapter.exists(`${folder}/annotations.md`)
+        || await vault.adapter.exists(`${folder}/annotations.previous.md`)
+        || await vault.adapter.exists(`${folder}/annotations.journal.jsonl`);
+      if (!hasAnnotations) continue;
+      try {
+        const manifest = coerceManifest(JSON.parse(await vault.adapter.read(manifestPath)), hash);
+        if (manifest) {
+          bundles.push({ hash, folder, manifest });
+          seen.add(hash);
+        }
+      } catch { /* skip damaged manifests without blocking healthy PDFs */ }
+      if (offset > 0 && offset % 100 === 0) await yieldToHost();
+    }
+  }
+  return bundles.sort((a, b) => a.manifest.workingPath.localeCompare(b.manifest.workingPath));
+}
+
+export async function exportAnnotationBundle(vault: Vault, bundle: AnnotationBundleInfo): Promise<{ path: string; count: number }> {
+  const repository = new AnnotationRepository(vault, bundle.folder, bundle.hash, bundle.manifest.workingPath);
+  const index = await repository.load();
+  return { path: await repository.exportReadable(index, bundle.manifest.originalName), count: index.logicalSize };
 }
 
 export async function verifyBundle(vault: Vault, bundle: BundleInfo): Promise<BackupVerification> {

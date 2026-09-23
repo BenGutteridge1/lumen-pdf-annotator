@@ -10,7 +10,7 @@ Lumen is a PDF reader for research-heavy vaults on desktop, phone, and tablet. I
 
 - A compact floating toolbar with direct page entry, nearby previous/next controls, zoom, search, annotations, and light/sepia/dark themes.
 - An immediate selection palette—no hover step—where choosing a colour prepares the mark and choosing its type applies it. Seven mark types are included: highlight, underline, dashed underline, dotted underline, strike-through, box, and comment.
-- A searchable table of contents appears only when the PDF provides an outline, preserves nested hierarchy, shows muted physical page numbers, and opens exact within-page destinations.
+- A searchable table of contents appears only when the PDF provides an outline, preserves nested hierarchy, shows muted physical page numbers, and opens exact within-page destinations. The current heading is marked with a slim accent line and centered in the list when you open it, where scrolling permits.
 - A floating PDF search that shows long, left-aligned excerpts so results make sense before you open them.
 - A virtualized annotation inspector with bright colour edges, readable quotes, notes, and one-click navigation.
 - A full editor for each saved mark, including colour, style, note, tags, copy, and delete.
@@ -92,7 +92,7 @@ Lumen supports Obsidian 1.13.7 or newer on desktop, iOS, and Android.
 
 ## Use
 
-Open any PDF after enabling Lumen. The PDF search, table of contents, and annotation inspector begin closed every time a document opens. When the PDF supplies a navigable outline, the toolbar shows a table-of-contents icon; its floating panel filters heading titles, preserves the PDF hierarchy, wraps long headings beside their page numbers, and jumps to the heading's exact destination. PDFs without an outline keep the button hidden. The current theme is shown as one compact icon whose menu contains Light, Sepia, and Dark. Lumen restores each PDF's saved page and zoom after its reader is ready, even when Obsidian opens another note in a new tab during startup.
+Open any PDF after enabling Lumen. The PDF search, table of contents, and annotation inspector begin closed every time a document opens. When the PDF supplies a navigable outline, the toolbar shows a table-of-contents icon; its floating panel filters heading titles, preserves the PDF hierarchy, wraps long headings beside their page numbers, marks the current heading, and jumps to the heading's exact destination. Opening the panel brings the current heading into the middle of the list unless it is too close to either end. PDFs without an outline keep the button hidden. The current theme is shown as one compact icon whose menu contains Light, Sepia, and Dark. Lumen restores each PDF's saved page and zoom after its reader is ready, even when Obsidian opens another note in a new tab during startup.
 
 Select text to open the compact markup palette. Choose a colour first, then choose a mark type to apply it immediately—there is no separate confirmation step. Choosing the comment type also opens the individual editor so you can add its note. Nothing is saved merely by choosing a swatch. Click an existing mark or its inspector card to open the individual editor. Use the sticky-note icon or **Place a page note** command to place a note anywhere on a page. PDF search marks every exact match on the rendered page, upgrades visible results to PDF.js's exact text-range geometry at every zoom level, and strengthens the selected result. The toolbar's theme controls affect the reading surface and editor together; the chosen theme persists and Lumen button text and icons follow your Obsidian accent colour in every PDF theme.
 
@@ -114,7 +114,7 @@ Previous page, next page, page-note placement, annotation checkpoint, export, le
 
 ### Backup, export, and migration commands
 
-- **Export annotations for this PDF** writes a readable Markdown file under `.lumen-pdf/exports/`.
+- **Export annotations for this PDF** writes a readable Markdown file under `.lumen-pdf/exports/`. In **Settings → Lumen PDF Annotator → Export annotations**, choose individual annotated PDFs or select all filtered matches and export them together. Each PDF gets a separate, uniquely named Markdown note with the source PDF path, page headings, quoted highlight text, attached notes, tags, and links back to the exact annotation. Multi-page highlights stay grouped with their one associated note. Exports do not include raw recovery JSON and do not change the source PDFs.
 - **Save an annotation checkpoint** immediately compacts the journal into a snapshot.
 - **Verify all PDF backup checksums** checks every local backup against its SHA-256 identity.
 - **Restore a backed-up PDF** verifies the checksum before creating a non-destructive copy under `.lumen-pdf/recovered/`.

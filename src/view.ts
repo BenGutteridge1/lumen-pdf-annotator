@@ -7,6 +7,8 @@ import { annotationTarget, comparableFileName, QuoteAnnotationRecord, quoteAnnot
 import { loadPdf } from "./pdf-runtime";
 import {
   cacheOutlineHeadingLocation,
+  centeredOutlineScrollTop,
+  currentOutlineEntry,
   filterOutlineEntries,
   findExactOutlineHeading,
   outlineDestinationOffset,
@@ -250,6 +252,9 @@ export class LumenPdfView extends FileView {
   private outlineEntries: ResolvedOutlineEntry[] = [];
   private outlineFilterTimer = 0;
   private outlineRenderRaf = 0;
+  private outlineFocusRaf = 0;
+  private activeOutlineId: string | null = null;
+  private readonly outlineItemById = new Map<string, HTMLButtonElement>();
   private readonly outlineValidationTasks = new Map<string, Promise<void>>();
   private themeButton: HTMLButtonElement | null = null;
   private inspector!: HTMLElement;
@@ -470,6 +475,16 @@ export class LumenPdfView extends FileView {
     this.outlineButton?.setAttribute("aria-pressed", String(opening));
     if (opening) {
       this.renderOutline();
+      window.cancelAnimationFrame(this.outlineFocusRaf);
+      this.outlineFocusRaf = window.requestAnimationFrame(() => {
+        this.focusCurrentOutlineItem();
+        // Off-screen rows can initially use content-visibility's intrinsic
+        // height. Recenter once their real height has been laid out.
+        this.outlineFocusRaf = window.requestAnimationFrame(() => {
+          this.outlineFocusRaf = 0;
+          this.focusCurrentOutlineItem();
+        });
+      });
       if (!this.mobileRuntime) window.setTimeout(() => this.outlineInput.focus(), 0);
     } else if (this.mobileRuntime) {
       this.outlineInput.blur();
@@ -553,12 +568,13 @@ export class LumenPdfView extends FileView {
     if (this.bundle) await this.bundle.repository.checkpoint(this.index);
   }
 
+  async flushAnnotationJournal(): Promise<void> {
+    if (this.bundle) await this.bundle.repository.flushJournal();
+  }
+
   async exportAnnotations(): Promise<string | null> {
     if (!this.bundle || !this.file) return null;
-    const safeName = this.file.basename.replace(/[\\/:*?"<>|]/g, "-");
-    const path = `.lumen-pdf/exports/${safeName}.annotations.md`;
-    await this.bundle.repository.exportTo(path, this.index);
-    return path;
+    return this.bundle.repository.exportReadable(this.index, this.file.name);
   }
 
   private buildShell(file: TFile): void {
@@ -860,13 +876,17 @@ export class LumenPdfView extends FileView {
 
   private renderOutline(): void {
     if (!this.outlineList) return;
+    const previousScrollTop = this.outlineList.scrollTop;
     this.outlineList.empty();
+    this.outlineItemById.clear();
     const entries = filterOutlineEntries(this.outlineEntries, this.outlineInput?.value ?? "");
     if (!entries.length) {
       this.outlineList.createDiv({ cls: "lumen-empty", text: "No matching headings" });
       return;
     }
     const fragment = createFragment();
+    const activeId = currentOutlineEntry(this.outlineEntries, this.currentPage)?.id ?? null;
+    this.activeOutlineId = activeId;
     for (const entry of entries) {
       const button = fragment.createEl("button", {
         cls: "lumen-outline-item",
@@ -875,6 +895,11 @@ export class LumenPdfView extends FileView {
           "aria-level": String(entry.depth + 1),
         },
       });
+      this.outlineItemById.set(entry.id, button);
+      if (entry.id === activeId) {
+        button.addClass("is-current");
+        button.setAttribute("aria-current", "location");
+      }
       button.style.setProperty("--lumen-outline-indent", `${Math.min(entry.depth, 12) * 14}px`);
       button.createSpan({ cls: "lumen-outline-title", text: entry.title });
       button.createSpan({
@@ -884,6 +909,33 @@ export class LumenPdfView extends FileView {
       button.addEventListener("click", () => void this.navigateToOutlineEntry(entry));
     }
     this.outlineList.append(fragment);
+    this.outlineList.scrollTop = previousScrollTop;
+  }
+
+  private updateOutlineCurrent(): void {
+    if (!this.outlinePanel?.classList.contains("is-open")) return;
+    const nextId = currentOutlineEntry(this.outlineEntries, this.currentPage)?.id ?? null;
+    if (nextId === this.activeOutlineId) return;
+    const previous = this.activeOutlineId ? this.outlineItemById.get(this.activeOutlineId) : null;
+    previous?.removeClass("is-current");
+    previous?.removeAttribute("aria-current");
+    this.activeOutlineId = nextId;
+    const current = nextId ? this.outlineItemById.get(nextId) : null;
+    current?.addClass("is-current");
+    current?.setAttribute("aria-current", "location");
+  }
+
+  private focusCurrentOutlineItem(): void {
+    const activeId = this.activeOutlineId;
+    if (!activeId || !this.outlinePanel.classList.contains("is-open")) return;
+    const item = this.outlineItemById.get(activeId);
+    if (!item) return;
+    this.outlineList.scrollTop = centeredOutlineScrollTop(
+      item.offsetTop,
+      item.offsetHeight,
+      this.outlineList.clientHeight,
+      this.outlineList.scrollHeight,
+    );
   }
 
   private async navigateToOutlineEntry(entry: ResolvedOutlineEntry): Promise<void> {
@@ -907,6 +959,7 @@ export class LumenPdfView extends FileView {
       const offset = outlineDestinationOffset(entry.destination, viewport);
       this.currentPage = pageNumber;
       this.pageInput.value = String(pageNumber);
+      this.updateOutlineCurrent();
       const rootRect = this.scrollEl.getBoundingClientRect();
       const shellRect = state.shell.getBoundingClientRect();
       const toolbarBottom = this.toolbarEl.getBoundingClientRect().bottom - rootRect.top;
@@ -1689,6 +1742,7 @@ export class LumenPdfView extends FileView {
     }
     this.currentPage = bestPage;
     this.pageInput.value = String(bestPage);
+    this.updateOutlineCurrent();
   }
 
   private handleScrollActivity(): void {
@@ -1754,6 +1808,7 @@ export class LumenPdfView extends FileView {
     if (!shell) return;
     this.currentPage = target;
     this.pageInput.value = String(target);
+    this.updateOutlineCurrent();
     const rootRect = this.scrollEl.getBoundingClientRect();
     const targetTop = this.scrollEl.scrollTop + shell.getBoundingClientRect().top - rootRect.top - 14;
     this.scrollEl.scrollTo({ top: Math.max(0, targetTop), behavior });
@@ -3241,6 +3296,7 @@ export class LumenPdfView extends FileView {
     window.cancelAnimationFrame(this.currentPageRaf);
     window.cancelAnimationFrame(this.inspectorRaf);
     window.cancelAnimationFrame(this.outlineRenderRaf);
+    window.cancelAnimationFrame(this.outlineFocusRaf);
     window.clearTimeout(this.scrollIdleTimer);
     window.clearTimeout(this.pagePreviewTimer);
     window.clearTimeout(this.pageDetailTimer);
@@ -3258,6 +3314,9 @@ export class LumenPdfView extends FileView {
     this.mobileKeyboardProbeTimer = 0;
     this.outlineFilterTimer = 0;
     this.outlineRenderRaf = 0;
+    this.outlineFocusRaf = 0;
+    this.activeOutlineId = null;
+    this.outlineItemById.clear();
     this.outlineValidationTasks.clear();
     this.mobileKeyboardProbeCount = 0;
     this.pageDetailReadyAt = 0;

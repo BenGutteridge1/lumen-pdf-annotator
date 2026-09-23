@@ -31,6 +31,83 @@
   white-space: nowrap;
   border: 0;
 }
+.lumen-export-modal {
+  width: min(620px, calc(100vw - 32px));
+}
+.lumen-export-modal .modal-content {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+}
+.lumen-export-modal .modal-content > p {
+  margin: 0;
+  color: var(--text-muted);
+}
+.lumen-export-search {
+  width: 100%;
+}
+.lumen-export-toolbar,
+.lumen-export-footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.lumen-export-toolbar > span {
+  flex: 1;
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+}
+.lumen-export-quiet-button {
+  background: transparent;
+  box-shadow: none;
+  color: var(--interactive-accent);
+}
+.lumen-export-list {
+  overflow-y: auto;
+  max-height: min(48vh, 430px);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-m);
+}
+.lumen-export-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  cursor: pointer;
+}
+.lumen-export-row + .lumen-export-row {
+  border-top: 1px solid var(--background-modifier-border);
+}
+.lumen-export-row input {
+  margin-top: 3px;
+  flex: 0 0 auto;
+}
+.lumen-export-row-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.lumen-export-name,
+.lumen-export-path {
+  overflow-wrap: anywhere;
+}
+.lumen-export-name {
+  font-weight: var(--font-semibold);
+}
+.lumen-export-path,
+.lumen-export-empty,
+.lumen-export-status {
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+}
+.lumen-export-empty {
+  padding: 10px 12px;
+}
+.lumen-export-footer {
+  justify-content: flex-end;
+}
 .lumen-scroll {
   position: absolute;
   inset: 0;
@@ -357,6 +434,7 @@
   padding: 5px 8px 10px;
 }
 .lumen-outline-item {
+  position: relative;
   display: grid;
   grid-template-columns: minmax(0, 1fr) max-content;
   align-items: start;
@@ -370,6 +448,22 @@
   white-space: normal;
   content-visibility: auto;
   contain-intrinsic-size: auto 34px;
+}
+.lumen-outline-item.is-current {
+  background: color-mix(in srgb, var(--lumen-accent) 11%, transparent);
+}
+.lumen-outline-item.is-current::before {
+  content: "";
+  position: absolute;
+  top: 6px;
+  bottom: 6px;
+  left: 1px;
+  width: 2px;
+  border-radius: 2px;
+  background: var(--lumen-accent);
+}
+.lumen-outline-item.is-current .lumen-outline-title {
+  color: var(--lumen-accent);
 }
 .lumen-outline-title {
   display: block;
