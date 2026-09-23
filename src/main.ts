@@ -1,8 +1,8 @@
-import { FuzzySuggestModal, normalizePath, Notice, ObsidianProtocolData, Platform, Plugin, PluginSettingTab, TFile } from "obsidian";
+import { FuzzySuggestModal, Modal, normalizePath, Notice, ObsidianProtocolData, Platform, Plugin, PluginSettingTab, TFile } from "obsidian";
 import type { SettingDefinitionItem } from "obsidian";
 import { LUMEN_PROTOCOL_ACTION } from "./links";
 import { disposePdfRuntime } from "./pdf-runtime";
-import { BundleInfo, listBundles, restoreBundle, verifyBundle } from "./storage";
+import { AnnotationBundleInfo, BundleInfo, exportAnnotationBundle, listAnnotationBundles, listBundles, restoreBundle, verifyBundle } from "./storage";
 import { LumenPdfView, LUMEN_VIEW_TYPE, PdfTheme } from "./view";
 import { PdfViewStateManager } from "./view-state";
 
@@ -282,6 +282,13 @@ class LumenSettingTab extends PluginSettingTab {
         desc: "Copy each opened PDF into Lumen's recovery storage in the background. Keep this off for the smoothest large-PDF and cloud-vault performance.",
         control: { type: "toggle", key: "automaticPdfBackups", defaultValue: DEFAULT_SETTINGS.automaticPdfBackups },
       },
+      {
+        name: "Export annotations",
+        desc: "Choose PDFs with Lumen annotations and export each one as a readable Markdown note in .lumen-pdf/exports/.",
+        render: setting => {
+          setting.addButton(button => button.setButtonText("Choose PDFs to export").onClick(() => new AnnotationExportModal(this.plugin).open()));
+        },
+      },
     ];
   }
 
@@ -309,5 +316,120 @@ class LumenSettingTab extends PluginSettingTab {
       this.plugin.settings.automaticPdfBackups = value;
       return this.plugin.saveSettings();
     }
+  }
+}
+
+class AnnotationExportModal extends Modal {
+  private bundles: AnnotationBundleInfo[] = [];
+  private readonly selected = new Set<string>();
+  private filter = "";
+  private listEl!: HTMLElement;
+  private countEl!: HTMLElement;
+  private statusEl!: HTMLElement;
+  private exportButton!: HTMLButtonElement;
+  private busy = false;
+
+  constructor(private readonly plugin: LumenPdfPlugin) {
+    super(plugin.app);
+  }
+
+  async onOpen(): Promise<void> {
+    this.modalEl.addClass("lumen-export-modal");
+    this.titleEl.setText("Export PDF annotations");
+    this.contentEl.empty();
+    this.contentEl.createEl("p", { text: "Select the PDFs to export. Each PDF gets its own markdown note with its highlights, associated notes, and page references." });
+    const search = this.contentEl.createEl("input", { type: "search", placeholder: "Filter PDFs by name or path", cls: "lumen-export-search" });
+    search.setAttribute("aria-label", "Filter PDFs to export");
+    search.addEventListener("input", () => { this.filter = search.value.toLowerCase().trim(); this.renderList(); });
+    const toolbar = this.contentEl.createDiv({ cls: "lumen-export-toolbar" });
+    this.countEl = toolbar.createSpan();
+    const selectMatches = toolbar.createEl("button", { text: "Select all matches", cls: "lumen-export-quiet-button" });
+    selectMatches.addEventListener("click", () => {
+      for (const bundle of this.visibleBundles()) this.selected.add(bundle.folder);
+      this.renderList();
+    });
+    const clear = toolbar.createEl("button", { text: "Clear", cls: "lumen-export-quiet-button" });
+    clear.addEventListener("click", () => { this.selected.clear(); this.renderList(); });
+    this.listEl = this.contentEl.createDiv({ cls: "lumen-export-list" });
+    this.listEl.setAttribute("role", "group");
+    this.listEl.setAttribute("aria-label", "PDFs with Lumen annotations");
+    this.statusEl = this.contentEl.createDiv({ cls: "lumen-export-status" });
+    const footer = this.contentEl.createDiv({ cls: "lumen-export-footer" });
+    this.exportButton = footer.createEl("button", { text: "Export selected", cls: "mod-cta" });
+    this.exportButton.addEventListener("click", () => void this.exportSelected());
+    this.renderList("Finding annotated PDFs…");
+    try {
+      // Persist pending edits in open readers without rebuilding large snapshots.
+      for (const leaf of this.plugin.app.workspace.getLeavesOfType(LUMEN_VIEW_TYPE)) {
+        if (leaf.view instanceof LumenPdfView) await leaf.view.flushAnnotationJournal();
+      }
+      this.bundles = await listAnnotationBundles(this.plugin.app.vault);
+      this.renderList();
+    } catch (error) {
+      this.renderList("Could not find annotations. Check the developer console.");
+      console.error("Lumen could not list annotation bundles", error);
+    }
+  }
+
+  private visibleBundles(): AnnotationBundleInfo[] {
+    if (!this.filter) return this.bundles;
+    return this.bundles.filter(bundle => `${bundle.manifest.originalName} ${bundle.manifest.workingPath}`.toLowerCase().includes(this.filter));
+  }
+
+  private renderList(message?: string): void {
+    if (!this.listEl) return;
+    this.listEl.empty();
+    const visible = this.visibleBundles();
+    this.countEl.setText(`${this.selected.size} selected · ${this.bundles.length} available`);
+    this.exportButton.disabled = this.busy || this.selected.size === 0;
+    if (message || this.bundles.length === 0) {
+      this.listEl.createEl("p", { text: message ?? "No PDFs with Lumen annotations were found in this vault.", cls: "lumen-export-empty" });
+      return;
+    }
+    if (!visible.length) {
+      this.listEl.createEl("p", { text: "No PDFs match this filter.", cls: "lumen-export-empty" });
+      return;
+    }
+    // Keep the modal cheap even when the vault has many annotated PDFs.
+    for (const bundle of visible.slice(0, 150)) {
+      const row = this.listEl.createEl("label", { cls: "lumen-export-row" });
+      const checkbox = row.createEl("input", { type: "checkbox" });
+      checkbox.checked = this.selected.has(bundle.folder);
+      checkbox.disabled = this.busy;
+      checkbox.addEventListener("change", () => {
+        if (checkbox.checked) this.selected.add(bundle.folder);
+        else this.selected.delete(bundle.folder);
+        this.countEl.setText(`${this.selected.size} selected · ${this.bundles.length} available`);
+        this.exportButton.disabled = this.selected.size === 0;
+      });
+      const text = row.createSpan({ cls: "lumen-export-row-text" });
+      text.createSpan({ cls: "lumen-export-name", text: bundle.manifest.originalName });
+      text.createSpan({ cls: "lumen-export-path", text: bundle.manifest.workingPath });
+    }
+    if (visible.length > 150) this.listEl.createEl("p", { text: `Showing the first 150 of ${visible.length} matches. Filter to browse more, or select all matches.`, cls: "lumen-export-empty" });
+  }
+
+  private async exportSelected(): Promise<void> {
+    if (this.busy || this.selected.size === 0) return;
+    this.busy = true;
+    this.renderList();
+    const chosen = this.bundles.filter(bundle => this.selected.has(bundle.folder));
+    let exported = 0;
+    const failures: string[] = [];
+    for (const bundle of chosen) {
+      this.statusEl.setText(`Exporting ${exported + failures.length + 1} of ${chosen.length}: ${bundle.manifest.originalName}`);
+      try {
+        await exportAnnotationBundle(this.plugin.app.vault, bundle);
+        exported++;
+      } catch (error) {
+        failures.push(bundle.manifest.originalName);
+        console.error(`Lumen could not export ${bundle.manifest.workingPath}`, error);
+      }
+      await new Promise<void>(resolve => window.setTimeout(resolve, 0));
+    }
+    this.busy = false;
+    this.renderList();
+    this.statusEl.setText(`${exported} PDF${exported === 1 ? "" : "s"} exported to .lumen-pdf/exports/${failures.length ? ` · ${failures.length} failed` : ""}`);
+    new Notice(this.statusEl.textContent ?? "Export complete.", failures.length ? 8000 : 5000);
   }
 }

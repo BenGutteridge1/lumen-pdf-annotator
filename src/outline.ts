@@ -15,6 +15,22 @@ export interface ResolvedOutlineEntry {
   validation: "unresolved" | "matched" | "unmatched";
 }
 
+/** The most recent navigable heading at or before the reader's current page. */
+export function currentOutlineEntry(entries: readonly ResolvedOutlineEntry[], page: number): ResolvedOutlineEntry | null {
+  let current: ResolvedOutlineEntry | null = null;
+  for (const entry of entries) {
+    if (entry.pageNumber > page) continue;
+    if (!current || entry.pageNumber >= current.pageNumber) current = entry;
+  }
+  return current;
+}
+
+/** Center the active row unless the list has reached its first or last row. */
+export function centeredOutlineScrollTop(itemTop: number, itemHeight: number, viewportHeight: number, contentHeight: number): number {
+  const centered = itemTop - (viewportHeight - itemHeight) / 2;
+  return Math.max(0, Math.min(centered, Math.max(0, contentHeight - viewportHeight)));
+}
+
 export interface OutlineHeadingGeometry {
   leftRatio: number;
   topRatio: number;
