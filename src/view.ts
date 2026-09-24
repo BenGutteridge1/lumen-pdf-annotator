@@ -1591,7 +1591,10 @@ export class LumenPdfView extends FileView {
       viewportHeight = Math.min(viewportHeight, Math.max(220, this.mobileViewportBaselineHeight * .56));
     }
     const rootRect = this.rootEl.getBoundingClientRect();
-    const rootViewportTop = Math.max(0, viewportTop - rootRect.top);
+    // The PDF leaf starts below Obsidian's mobile header. This offset must be
+    // allowed to go negative: clamping it to zero pushes keyboard-open panels
+    // down by the header height and hides their lower portion behind the IME.
+    const rootViewportTop = viewportTop - rootRect.top;
     const layoutHeight = Math.max(viewWindow?.innerHeight ?? 0, doc.documentElement.clientHeight, rootRect.bottom);
     const keyboardOffset = keyboardOpen ? Math.max(0, layoutHeight - viewportTop - viewportHeight) : 0;
     // Some Android WebViews resize the Obsidian leaf itself to the visible

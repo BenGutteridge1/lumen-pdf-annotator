@@ -1486,7 +1486,8 @@
 .lumen-reader.is-mobile .lumen-inspector {
   top: auto;
   right: calc(6px + env(safe-area-inset-right, 0px));
-  bottom: calc(6px + env(safe-area-inset-bottom, 0px) + var(--lumen-mobile-keyboard-offset, 0px));
+  /* Keep the existing sheet size, but clear Obsidian's bottom navigation. */
+  bottom: calc(62px + env(safe-area-inset-bottom, 0px) + var(--lumen-mobile-keyboard-offset, 0px));
   left: calc(6px + env(safe-area-inset-left, 0px));
   width: auto;
   height: min(72dvh, calc(var(--lumen-mobile-viewport-height, 100dvh) - 78px));
