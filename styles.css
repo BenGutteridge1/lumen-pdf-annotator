@@ -515,6 +515,20 @@
   color: var(--lumen-muted);
   font-size: 10px;
 }
+.lumen-card-meta .lumen-card-edit {
+  width: 30px;
+  height: 30px;
+  min-width: 30px;
+  margin: -5px -4px -5px auto;
+  padding: 6px;
+  background: transparent;
+  box-shadow: none;
+  color: var(--lumen-muted);
+}
+.lumen-card-meta .lumen-card-edit:hover,
+.lumen-card-meta .lumen-card-edit:focus-visible {
+  color: var(--lumen-accent);
+}
 .lumen-card-meta strong {
   color: var(--lumen-text);
   font-size: 11px;
@@ -1484,13 +1498,12 @@
 .lumen-reader.is-mobile .lumen-search-panel,
 .lumen-reader.is-mobile .lumen-outline-panel,
 .lumen-reader.is-mobile .lumen-inspector {
-  top: auto;
+  top: calc(var(--lumen-mobile-toolbar-height) + env(safe-area-inset-top, 0px) + 6px);
   right: calc(6px + env(safe-area-inset-right, 0px));
-  /* Keep the existing sheet size, but clear Obsidian's bottom navigation. */
-  bottom: calc(62px + env(safe-area-inset-bottom, 0px) + var(--lumen-mobile-keyboard-offset, 0px));
+  bottom: auto;
   left: calc(6px + env(safe-area-inset-left, 0px));
   width: auto;
-  height: min(72dvh, calc(var(--lumen-mobile-viewport-height, 100dvh) - 78px));
+  height: var(--lumen-mobile-panel-height, min(72dvh, calc(var(--lumen-mobile-viewport-height, 100dvh) - 78px)));
   max-height: 680px;
   border-radius: 18px;
   background: var(--lumen-surface);
@@ -1505,17 +1518,10 @@
 .lumen-reader.is-mobile.has-mobile-keyboard .lumen-outline-panel,
 .lumen-reader.is-mobile.has-mobile-keyboard .lumen-inspector {
   z-index: 45;
-  top: calc(var(--lumen-mobile-root-viewport-top, 0px) + max(6px, calc(var(--lumen-mobile-viewport-height, 100dvh) - 306px)));
-  bottom: auto;
-  height: min(300px, calc(var(--lumen-mobile-viewport-height, 100dvh) - 12px));
-  max-height: 300px;
-  border-radius: 16px;
 }
 .lumen-reader.is-mobile.has-mobile-keyboard .lumen-inspector.is-mobile-querying {
   right: calc(12px + env(safe-area-inset-right, 0px));
   left: calc(12px + env(safe-area-inset-left, 0px));
-  height: min(300px, calc(var(--lumen-mobile-viewport-height, 100dvh) - 12px));
-  border-radius: 16px;
 }
 .lumen-reader.is-mobile.has-mobile-keyboard .lumen-inspector.is-mobile-querying .lumen-filter-row,
 .lumen-reader.is-mobile.has-mobile-keyboard .lumen-inspector.is-mobile-querying .lumen-inspector-options {
