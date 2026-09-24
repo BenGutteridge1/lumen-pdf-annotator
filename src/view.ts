@@ -319,6 +319,7 @@ export class LumenPdfView extends FileView {
   private mobileLayoutWidth = 0;
   private mobileViewportBaselineWidth = 0;
   private mobileViewportBaselineHeight = 0;
+  private mobilePanelHeight = 0;
   private mobileKeyboardProbeTimer = 0;
   private mobileKeyboardProbeCount = 0;
 
@@ -454,15 +455,20 @@ export class LumenPdfView extends FileView {
     const opening = !this.searchPanel.classList.contains("is-open");
     if (opening && this.outlinePanel.classList.contains("is-open")) this.toggleOutline();
     if (opening && this.mobileRuntime && this.inspector.classList.contains("is-open")) this.toggleInspector();
-    this.searchPanel.classList.toggle("is-open", opening);
-    if (opening) window.setTimeout(() => this.searchInput.focus(), 0);
-    else {
-      if (this.mobileRuntime) this.searchInput.blur();
-      this.searchGeneration++;
-      this.clearSearchFlashes();
-      this.searchInput.value = "";
-      this.searchResults.empty();
-    }
+    if (opening) {
+      this.searchPanel.addClass("is-open");
+      window.setTimeout(() => this.searchInput.focus(), 0);
+    } else this.closeSearchPanel(false);
+  }
+
+  private closeSearchPanel(keepPdfMatches: boolean): void {
+    this.searchPanel.removeClass("is-open");
+    if (this.mobileRuntime) this.searchInput.blur();
+    if (keepPdfMatches) return;
+    this.searchGeneration++;
+    this.clearSearchFlashes();
+    this.searchInput.value = "";
+    this.searchResults.empty();
   }
 
   toggleOutline(): void {
@@ -980,7 +986,7 @@ export class LumenPdfView extends FileView {
       );
       const contextAnchor = Math.max(clearance, Math.min(160, this.scrollEl.clientHeight * .18));
       const top = this.scrollEl.scrollTop + shellRect.top - rootRect.top + framedOffset - contextAnchor;
-      if (this.mobileRuntime) this.toggleOutline();
+      if (this.mobileRuntime && this.outlinePanel.classList.contains("is-open")) this.toggleOutline();
       this.scrollEl.scrollTo({ top: Math.max(0, top), left: this.scrollEl.scrollLeft, behavior: "smooth" });
     } catch (error) {
       if (generation === this.documentGeneration) console.warn(`Lumen could not open PDF heading on page ${entry.pageNumber}`, error);
@@ -1565,18 +1571,19 @@ export class LumenPdfView extends FileView {
       || Math.abs(viewportWidth - this.mobileViewportBaselineWidth) >= 80) {
       this.mobileViewportBaselineWidth = viewportWidth;
       this.mobileViewportBaselineHeight = reportedViewportHeight;
+      this.mobilePanelHeight = 0;
+      this.rootEl.style.removeProperty("--lumen-mobile-panel-height");
     } else {
       this.mobileViewportBaselineHeight = Math.max(this.mobileViewportBaselineHeight, reportedViewportHeight);
     }
-    const active = doc.activeElement;
-    const editing = active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement || active instanceof HTMLSelectElement;
     const platformMetrics = Platform as typeof Platform & ObsidianMobilePlatformMetrics;
     const nativeKeyboardVisible = platformMetrics.mobileSoftKeyboardVisible === true;
     const nativeDeviceHeight = Number(platformMetrics.mobileDeviceHeight) || 0;
     const nativeKeyboardHeight = Number(platformMetrics.mobileKeyboardHeight) || 0;
     const viewportReduced = this.mobileViewportBaselineHeight - reportedViewportHeight >= 80;
-    const keyboardOpen = editing || nativeKeyboardVisible || (viewportReduced
-      && this.rootEl.classList.contains("has-mobile-keyboard"));
+    // An input can stay focused after Android dismisses the keyboard. Focus
+    // alone must not keep the panel in its keyboard position.
+    const keyboardOpen = nativeKeyboardVisible || viewportReduced;
     let viewportHeight = reportedViewportHeight;
     const nativeVisibleHeight = nativeDeviceHeight - nativeKeyboardHeight;
     const nativeMetricsUsable = nativeKeyboardVisible
@@ -1591,7 +1598,13 @@ export class LumenPdfView extends FileView {
       viewportHeight = Math.min(viewportHeight, Math.max(220, this.mobileViewportBaselineHeight * .56));
     }
     const rootRect = this.rootEl.getBoundingClientRect();
-    const rootViewportTop = Math.max(0, viewportTop - rootRect.top);
+    if (!keyboardOpen && !this.mobilePanelHeight && this.searchPanel?.isConnected) {
+      const measured = Number.parseFloat(getComputedStyle(this.searchPanel).height);
+      if (measured > 0) {
+        this.mobilePanelHeight = measured;
+        this.rootEl.style.setProperty("--lumen-mobile-panel-height", `${Math.round(measured)}px`);
+      }
+    }
     const layoutHeight = Math.max(viewWindow?.innerHeight ?? 0, doc.documentElement.clientHeight, rootRect.bottom);
     const keyboardOffset = keyboardOpen ? Math.max(0, layoutHeight - viewportTop - viewportHeight) : 0;
     // Some Android WebViews resize the Obsidian leaf itself to the visible
@@ -1608,7 +1621,6 @@ export class LumenPdfView extends FileView {
     const viewportCenter = viewportTop + viewportHeight / 2;
     this.rootEl.classList.toggle("has-mobile-keyboard", keyboardOpen);
     this.rootEl.style.setProperty("--lumen-mobile-viewport-top", `${Math.round(viewportTop)}px`);
-    this.rootEl.style.setProperty("--lumen-mobile-root-viewport-top", `${Math.round(rootViewportTop)}px`);
     this.rootEl.style.setProperty("--lumen-mobile-viewport-center", `${Math.round(viewportCenter)}px`);
     this.rootEl.style.setProperty("--lumen-mobile-viewport-height", `${Math.round(viewportHeight)}px`);
     this.rootEl.style.setProperty("--lumen-mobile-keyboard-offset", `${Math.round(keyboardOffset)}px`);
@@ -1801,7 +1813,7 @@ export class LumenPdfView extends FileView {
     this.pumpPageMounts();
   }
 
-  private goToPage(page: number, behavior: ScrollBehavior = "smooth"): void {
+  private goToPage(page: number, behavior: ScrollBehavior = "smooth", yRatio?: number): void {
     if (!this.pdfDocument) return;
     const target = clamp(Math.round(page), 1, this.pdfDocument.numPages);
     const shell = this.pages.get(target)?.shell;
@@ -1810,7 +1822,11 @@ export class LumenPdfView extends FileView {
     this.pageInput.value = String(target);
     this.updateOutlineCurrent();
     const rootRect = this.scrollEl.getBoundingClientRect();
-    const targetTop = this.scrollEl.scrollTop + shell.getBoundingClientRect().top - rootRect.top - 14;
+    const shellRect = shell.getBoundingClientRect();
+    const offset = yRatio === undefined
+      ? 14
+      : Math.max(14, Math.min(160, this.scrollEl.clientHeight * .2)) - clamp(yRatio, 0, 1) * shellRect.height;
+    const targetTop = this.scrollEl.scrollTop + shellRect.top - rootRect.top - offset;
     this.scrollEl.scrollTo({ top: Math.max(0, targetTop), behavior });
   }
 
@@ -2675,12 +2691,20 @@ export class LumenPdfView extends FileView {
       const meta = card.createDiv({ cls: "lumen-card-meta" });
       meta.createEl("strong", { text: this.annotationPageLabel(item, "p.") });
       meta.createSpan({ text: item.kind === "page-note" ? "page note" : item.note ? "note" : markLabel(item.style) });
+      if (this.mobileRuntime) {
+        const edit = iconButton("pencil", "Edit annotation", () => this.openInspectorDetail(item.id));
+        edit.addClass("lumen-card-edit");
+        edit.addEventListener("keydown", event => event.stopPropagation());
+        meta.append(edit);
+      }
       card.createDiv({ cls: "lumen-card-note", text: item.note || item.quote });
       if (item.note) card.createDiv({ cls: "lumen-card-quote", text: item.quote });
       const activate = () => {
-        this.goToPage(item.page);
+        this.goToPage(item.page, "smooth", this.mobileRuntime ? item.rects[0]?.y : undefined);
         this.flashAnnotation(item.id);
-        this.openInspectorDetail(item.id);
+        if (this.mobileRuntime) {
+          if (this.inspector.classList.contains("is-open")) this.toggleInspector();
+        } else this.openInspectorDetail(item.id);
       };
       card.addEventListener("click", activate);
       if (this.mobileRuntime) card.addEventListener("keydown", event => {
@@ -2887,7 +2911,7 @@ export class LumenPdfView extends FileView {
       excerpt.append(doc.createTextNode(hit.after));
       const activate = () => {
         this.activeSearchHit = hit;
-        this.goToPage(hit.page);
+        this.goToPage(hit.page, "smooth", hit.rects[0]?.y);
         const state = this.pages.get(hit.page);
         if (state) {
           if (state.canvasReady) this.renderSearchMarks(hit.page);
@@ -2895,6 +2919,7 @@ export class LumenPdfView extends FileView {
         }
         state?.shell.classList.add("is-search-flash");
         window.setTimeout(() => state?.shell.classList.remove("is-search-flash"), 850);
+        if (this.mobileRuntime) this.closeSearchPanel(true);
       };
       card.addEventListener("click", activate);
       if (this.mobileRuntime) card.addEventListener("keydown", event => {
@@ -3319,6 +3344,7 @@ export class LumenPdfView extends FileView {
     this.outlineItemById.clear();
     this.outlineValidationTasks.clear();
     this.mobileKeyboardProbeCount = 0;
+    this.mobilePanelHeight = 0;
     this.pageDetailReadyAt = 0;
     this.isScrolling = false;
     this.mobileSuspended = false;
