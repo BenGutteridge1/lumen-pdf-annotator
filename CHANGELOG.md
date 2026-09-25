@@ -2,6 +2,12 @@
 
 All notable changes to Lumen PDF Annotator are documented here.
 
+## 1.0.19 — 2026-09-25
+
+- Improved PDF outline heading validation so body mentions, printed contents rows, running headers, and text from separate columns are less likely to be mistaken for the heading itself.
+- Matched full headings more reliably across wrapped lines, ligatures, and accented text while keeping the PDF's original bookmark titles and hierarchy.
+- Kept the table of contents hidden for PDFs without navigable bookmarks and preserved the original bookmark destination when a nearby heading cannot be confirmed.
+
 ## 1.0.16 — 2026-09-22
 
 - Wrapped long table-of-contents headings while reserving their page-number column.
