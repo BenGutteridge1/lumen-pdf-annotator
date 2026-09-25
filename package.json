@@ -14,6 +14,7 @@
   "scripts": {
     "dev": "node esbuild.config.mjs",
     "typecheck": "tsc --noEmit --skipLibCheck",
+    "test:outline": "node --test test/outline-accuracy.test.mjs",
     "lint": "eslint .",
     "build": "tsc --noEmit --skipLibCheck && node esbuild.config.mjs production"
   },

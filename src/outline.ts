@@ -215,13 +215,103 @@ function titleBoundaryCharacter(value: string | undefined): boolean {
   return value !== undefined && /[\p{L}\p{N}]/u.test(value);
 }
 
+function foldedText(value: string): { text: string; starts: number[]; ends: number[] } {
+  let text = "";
+  const starts: number[] = [];
+  const ends: number[] = [];
+  for (let index = 0; index < value.length;) {
+    const character = String.fromCodePoint(value.codePointAt(index) ?? 0);
+    const end = index + character.length;
+    const folded = character.normalize("NFKD").toLocaleLowerCase();
+    text += folded;
+    for (let offset = 0; offset < folded.length; offset++) {
+      starts.push(index);
+      ends.push(end);
+    }
+    index = end;
+  }
+  return { text, starts, ends };
+}
+
+function sameVisualLine(first: OutlineSearchTextSpan, second: OutlineSearchTextSpan): boolean {
+  const firstCenter = first.rect.y + first.rect.height / 2;
+  const secondCenter = second.rect.y + second.rect.height / 2;
+  return Math.abs(firstCenter - secondCenter) <= Math.max(first.rect.height, second.rect.height) * .55;
+}
+
+function coherentHeadingSpans(spans: readonly OutlineSearchTextSpan[]): boolean {
+  for (let index = 1; index < spans.length; index++) {
+    const previous = spans[index - 1].rect;
+    const current = spans[index].rect;
+    const horizontalGap = Math.max(
+      0,
+      current.x - (previous.x + previous.width),
+      previous.x - (current.x + current.width),
+    );
+    if (horizontalGap > .1) return false;
+    if (sameVisualLine(spans[index - 1], spans[index])) {
+      continue;
+    } else {
+      const verticalGap = current.y - (previous.y + previous.height);
+      if (verticalGap < -.005 || verticalGap > Math.max(previous.height, current.height) * 2) return false;
+    }
+  }
+  return true;
+}
+
+function isolatedHeadingLine(
+  page: OutlineSearchPage,
+  matching: readonly OutlineSearchTextSpan[],
+  start: number,
+  end: number,
+): boolean {
+  const prefixes: Array<{ text: string; rect: OutlineSearchTextSpan["rect"] }> = [];
+  const suffixes: string[] = [];
+  for (const span of matching) {
+    if (span.start < start) prefixes.push({ text: page.text.slice(span.start, start), rect: span.rect });
+    if (span.end > end) suffixes.push(page.text.slice(end, span.end));
+  }
+  const selected = new Set(matching);
+  for (const span of page.spans) {
+    if (selected.has(span)) continue;
+    let left = Infinity;
+    let right = -Infinity;
+    for (const match of matching) {
+      if (!sameVisualLine(match, span)) continue;
+      left = Math.min(left, match.rect.x);
+      right = Math.max(right, match.rect.x + match.rect.width);
+    }
+    if (left === Infinity) continue;
+    const text = page.text.slice(span.start, span.end);
+    if (span.rect.x + span.rect.width <= left + .005) prefixes.push({ text, rect: span.rect });
+    else if (span.rect.x >= right - .005) suffixes.push(text);
+    else return false;
+  }
+  if (suffixes.some(text => text.trim())) return false;
+  const prefix = prefixes.sort((a, b) => a.rect.x - b.rect.x).map(part => part.text.trim()).filter(Boolean).join(" ");
+  if (!prefix) return true;
+  // PDF chapter/section counters may be separate text items or part of the
+  // heading item itself. A folio far from the title is not such a counter.
+  const prefixEnd = Math.max(...prefixes.map(part => part.rect.x + part.rect.width));
+  const titleLeft = Math.min(...matching.map(span => span.rect.x));
+  if (titleLeft - prefixEnd > .1) return false;
+  return /^(?:(?:chapter|part|section|appendix)\s+)?(?:\d+(?:\.\d+)*\.?|[ivxlcdm]+\.?|[a-z]\.?)\s*[:.)-]?$/iu.test(prefix);
+}
+
 function geometryForRange(
-  spans: readonly OutlineSearchTextSpan[],
+  page: OutlineSearchPage,
   start: number,
   end: number,
 ): { geometry: OutlineHeadingGeometry; textHeight: number } | null {
-  const matching = spans.filter(span => span.end > start && span.start < end);
+  const matching = page.spans.filter(span => span.end > start && span.start < end).sort((a, b) => a.start - b.start);
   if (!matching.length) return null;
+  let coveredTo = start;
+  for (const span of matching) {
+    if (page.text.slice(coveredTo, Math.min(span.start, end)).trim()) return null;
+    coveredTo = Math.max(coveredTo, span.end);
+  }
+  if (page.text.slice(coveredTo, end).trim()) return null;
+  if (!coherentHeadingSpans(matching) || !isolatedHeadingLine(page, matching, start, end)) return null;
   const left = Math.min(...matching.map(span => span.rect.x));
   const top = Math.min(...matching.map(span => span.rect.y));
   const right = Math.max(...matching.map(span => span.rect.x + span.rect.width));
@@ -243,26 +333,61 @@ export function exactOutlineHeadingGeometry(
   page: OutlineSearchPage,
   title: string,
 ): OutlineHeadingGeometry | null {
-  const needle = normalizedTitle(title).toLocaleLowerCase();
-  if (!needle) return null;
-  const haystack = page.text.toLocaleLowerCase();
-  let from = 0;
-  let best: { geometry: OutlineHeadingGeometry; textHeight: number } | null = null;
-  while (from <= haystack.length - needle.length) {
-    const start = haystack.indexOf(needle, from);
-    if (start < 0) break;
-    const end = start + needle.length;
-    const startsInsideWord = titleBoundaryCharacter(needle[0]) && titleBoundaryCharacter(haystack[start - 1]);
-    const endsInsideWord = titleBoundaryCharacter(needle.at(-1)) && titleBoundaryCharacter(haystack[end]);
-    if (!startsInsideWord && !endsInsideWord) {
-      const candidate = geometryForRange(page.spans, start, end);
-      if (candidate && (!best
-        || candidate.textHeight > best.textHeight
-        || (candidate.textHeight === best.textHeight && candidate.geometry.topRatio < best.geometry.topRatio))) {
-        best = candidate;
+  const sourceTitle = normalizedTitle(title);
+  if (!sourceTitle) return null;
+  const simpleNeedle = sourceTitle.toLocaleLowerCase();
+  const simpleHaystack = page.text.toLocaleLowerCase();
+  type HeadingMatch = { geometry: OutlineHeadingGeometry; textHeight: number };
+  const search = (
+    haystack: string,
+    needle: string,
+    previous: HeadingMatch | null,
+    starts?: readonly number[],
+    ends?: readonly number[],
+  ): HeadingMatch | null => {
+    let best = previous;
+    let from = 0;
+    while (from <= haystack.length - needle.length) {
+      const foldedStart = haystack.indexOf(needle, from);
+      if (foldedStart < 0) break;
+      const foldedEnd = foldedStart + needle.length;
+      // A match must not start or end inside one expanded source glyph (for
+      // example, matching just "f" against the "ffi" expansion of "ﬃ").
+      if ((starts && foldedStart > 0 && starts[foldedStart] === starts[foldedStart - 1])
+        || (ends && foldedEnd < ends.length && ends[foldedEnd - 1] === ends[foldedEnd])) {
+        from = foldedStart + Math.max(1, needle.length);
+        continue;
       }
+      const start = starts?.[foldedStart] ?? foldedStart;
+      const end = ends?.[foldedEnd - 1] ?? foldedEnd;
+      const startsInsideWord = titleBoundaryCharacter(sourceTitle[0]) && titleBoundaryCharacter(page.text[start - 1]);
+      const endsInsideWord = titleBoundaryCharacter(sourceTitle.at(-1)) && titleBoundaryCharacter(page.text[end]);
+      if (!startsInsideWord && !endsInsideWord) {
+        const candidate = geometryForRange(page, start, end);
+        if (candidate && (!best
+          || candidate.textHeight > best.textHeight
+          || (candidate.textHeight === best.textHeight && candidate.geometry.topRatio < best.geometry.topRatio))) {
+          best = candidate;
+        }
+      }
+      from = foldedStart + Math.max(1, needle.length);
     }
-    from = start + Math.max(1, needle.length);
+    return best;
+  };
+  let best: HeadingMatch | null = null;
+  if (simpleHaystack.length === page.text.length && simpleNeedle.length === sourceTitle.length) {
+    best = search(simpleHaystack, simpleNeedle, best);
+    if (best) return best.geometry;
+  }
+  // Most titles use the length-preserving fast path. Build the source-offset
+  // projection only for a case-fold expansion or a possible Unicode-equivalent
+  // miss (such as a decomposed accent or a typographic ligature).
+  if (simpleHaystack.length !== page.text.length
+    || simpleNeedle.length !== sourceTitle.length
+    || sourceTitle.normalize("NFKD") !== sourceTitle
+    || page.text.normalize("NFKD") !== page.text) {
+    const foldedPage = foldedText(page.text);
+    best = search(foldedPage.text, foldedText(sourceTitle).text, best, foldedPage.starts, foldedPage.ends);
   }
   return best?.geometry ?? null;
 }
