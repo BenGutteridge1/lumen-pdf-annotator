@@ -2,7 +2,7 @@
 
 All notable changes to Lumen PDF Annotator are documented here.
 
-## Unreleased
+## 1.0.20 — 2026-10-08
 
 - Preserved word spacing across selected PDF lines and expanded correctly mapped Latin ligatures without changing mathematical or superscript characters. Unmapped glyphs appear as `�` rather than silently disappearing; PDFs with missing character mappings still require a corrected text layer to recover their letters.
 - Made long quotes scrollable in the compact annotation editor, including touch and keyboard scrolling.
