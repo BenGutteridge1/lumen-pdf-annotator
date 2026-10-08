@@ -2,6 +2,14 @@
 
 All notable changes to Lumen PDF Annotator are documented here.
 
+## 1.0.20 — 2026-10-08
+
+- Preserved word spacing across selected PDF lines and expanded correctly mapped Latin ligatures without changing mathematical or superscript characters. Unmapped glyphs appear as `�` rather than silently disappearing; PDFs with missing character mappings still require a corrected text layer to recover their letters.
+- Made long quotes scrollable in the compact annotation editor, including touch and keyboard scrolling.
+- Put the bold highlighted quote first in inspector cards, followed by the annotation note in regular text.
+- Ordered new annotation extensions by their original page-text positions, including selections before a mark, overlapping text, repeated words, and multiple pages. New cross-page selections share one logical annotation.
+- Preserved existing snapshots and journals without rewriting their quotes or migrating their groups. Optional source anchors improve new annotations; older annotations continue to extend using their saved page and mark positions.
+
 ## 1.0.19 — 2026-09-25
 
 - Improved PDF outline heading validation so body mentions, printed contents rows, running headers, and text from separate columns are less likely to be mistaken for the heading itself.

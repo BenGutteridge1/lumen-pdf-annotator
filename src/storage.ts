@@ -1,6 +1,7 @@
 import { normalizePath, TFile, Vault } from "obsidian";
 import { AnnotationIndex, AnnotationMutation, MARK_COLORS, MarkStyle, PdfAnnotation } from "./model";
 import { writeAnnotationExport } from "./annotation-export";
+import { normalizeQuoteRanges } from "./annotation-text";
 
 const ROOT = ".lumen-pdf/bundles/sha256";
 const LEGACY_ROOT = ".pdf-annotator/bundles/sha256";
@@ -211,6 +212,7 @@ function normalizeAnnotation(value: unknown): PdfAnnotation | null {
   if (!rects.length) return null;
   const createdAt = finite(item.createdAt, Date.now());
   const style = isMarkStyle(item.style) ? item.style : "highlight";
+  const quoteRanges = normalizeQuoteRanges(item.quoteRanges);
   return {
     id: item.id,
     groupId: typeof item.groupId === "string" && item.groupId.trim() ? item.groupId : undefined,
@@ -218,6 +220,7 @@ function normalizeAnnotation(value: unknown): PdfAnnotation | null {
     page,
     rects,
     quote: typeof item.quote === "string" ? item.quote : item.kind === "page-note" ? "Page note" : "",
+    ...(quoteRanges ? { quoteRanges } : {}),
     note: typeof item.note === "string" ? item.note : "",
     tags: Array.isArray(item.tags) ? item.tags.filter((tag): tag is string => typeof tag === "string") : [],
     color: typeof item.color === "string" && item.color.trim() ? item.color : MARK_COLORS[0],

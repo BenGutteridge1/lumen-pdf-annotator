@@ -7,6 +7,13 @@ export interface NormalizedRect {
   height: number;
 }
 
+/** Raw page-text offsets, before display whitespace/ligature normalization. */
+export interface AnnotationQuoteRange {
+  start: number;
+  end: number;
+  text: string;
+}
+
 export interface PdfAnnotation {
   id: string;
   groupId?: string;
@@ -14,6 +21,8 @@ export interface PdfAnnotation {
   page: number;
   rects: NormalizedRect[];
   quote: string;
+  // Optional, additive anchors. Older snapshots/readers still use `quote`.
+  quoteRanges?: AnnotationQuoteRange[];
   note: string;
   tags: string[];
   color: string;
