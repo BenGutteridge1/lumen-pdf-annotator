@@ -603,20 +603,32 @@
   text-overflow: ellipsis;
 }
 .lumen-card-note {
-  -webkit-line-clamp: 3;
-  color: var(--lumen-text);
-  font-size: 12px;
-  font-weight: 560;
+  -webkit-line-clamp: 2;
+  color: var(--lumen-muted);
+  font-size: 11px;
+  font-weight: 400;
   line-height: 1.35;
-}
-.lumen-card-quote {
-  -webkit-line-clamp: 3;
   margin-top: 5px;
   padding-top: 5px;
   border-top: 1px solid var(--lumen-border);
-  color: var(--lumen-muted);
-  font-size: 11px;
+}
+.lumen-card-quote {
+  -webkit-line-clamp: 3;
+  color: var(--lumen-text);
+  font-size: 12px;
+  font-weight: 650;
   line-height: 1.35;
+}
+.lumen-annotation-card.has-note .lumen-card-quote {
+  -webkit-line-clamp: 2;
+}
+.lumen-card-meta + .lumen-card-note {
+  -webkit-line-clamp: 4;
+  color: var(--lumen-text);
+  font-size: 12px;
+  margin-top: 0;
+  padding-top: 0;
+  border-top: 0;
 }
 .lumen-empty {
   display: flex;
@@ -732,13 +744,13 @@
   font-family: var(--font-text);
   font-size: 12px;
   line-height: 1.45;
+  overflow-wrap: anywhere;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
 }
 .lumen-editor-quote.is-compact {
-  display: -webkit-box;
-  max-height: 64px;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 3;
-  overflow: hidden;
+  max-height: 104px;
+  overflow: auto;
 }
 .lumen-note-input {
   display: block;
@@ -1620,10 +1632,10 @@
   font-size: 11px;
 }
 .lumen-reader.is-mobile .lumen-search-excerpt,
-.lumen-reader.is-mobile .lumen-card-note {
+.lumen-reader.is-mobile .lumen-card-quote {
   font-size: 13px;
 }
-.lumen-reader.is-mobile .lumen-card-quote {
+.lumen-reader.is-mobile .lumen-card-note {
   font-size: 12px;
 }
 .lumen-reader.is-mobile .lumen-inspector-detail {

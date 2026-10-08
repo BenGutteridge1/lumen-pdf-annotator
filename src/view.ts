@@ -2,7 +2,8 @@ import { FileView, Menu, Notice, Platform, Scope, setIcon, TFile, WorkspaceLeaf 
 import type { PDFDocumentProxy, PDFPageProxy, PDFWorker, RenderTask, TextContent, TextItem } from "pdfjs-dist/types/src/display/api";
 import type { TextLayer } from "pdfjs-dist/types/src/display/text_layer";
 import { annotationMarkdownLink } from "./links";
-import { AnnotationIndex, MARK_COLORS, MarkStyle, newAnnotation, newPageNote, NormalizedRect, PdfAnnotation } from "./model";
+import { AnnotationIndex, AnnotationQuoteRange, MARK_COLORS, MarkStyle, newAnnotation, newPageNote, NormalizedRect, PdfAnnotation } from "./model";
+import { buildQuoteTextRuns, extendAnnotationQuote, normalizeQuoteText, quoteFromPageRanges, quoteRangesForSlices, QuoteRunSlice, QuoteTextRun } from "./annotation-text";
 import { annotationTarget, comparableFileName, QuoteAnnotationRecord, quoteAnnotations } from "./legacy";
 import { loadPdf } from "./pdf-runtime";
 import {
@@ -94,13 +95,20 @@ interface PageState {
   markHitGrid?: Map<number, PdfAnnotation[]>;
   markWideHits?: PdfAnnotation[];
   searchTextRuns?: SearchTextRun[];
+  quoteTextRuns?: QuoteDomRun[];
 }
 
 interface PendingSelection {
   quote: string;
   pages: Map<number, NormalizedRect[]>;
+  quoteRanges: Map<number, AnnotationQuoteRange[]>;
+  nativeRange: Range;
   x: number;
   y: number;
+}
+
+interface QuoteDomRun extends QuoteTextRun {
+  element: HTMLElement;
 }
 
 interface SearchHit {
@@ -1178,6 +1186,7 @@ export class LumenPdfView extends FileView {
     state.textHost = null;
     state.markHost = null;
     state.searchTextRuns = undefined;
+    state.quoteTextRuns = undefined;
   }
 
   private schedulePageMount(state: PageState): void {
@@ -1362,6 +1371,9 @@ export class LumenPdfView extends FileView {
         await textLayer.render();
         if (!this.isScrolling && state.wanted && state.mounted && generation === state.textGeneration) {
           state.searchTextRuns = this.buildSearchTextRuns(textLayer);
+          state.quoteTextRuns = buildQuoteTextRuns(textContent.items.filter(isPdfTextItem))
+            .map((run, index) => ({ ...run, element: textLayer.textDivs[index] }))
+            .filter(run => run.element?.isConnected && run.element.textContent === run.text);
           state.textReady = true;
           // Initial search marks use cheap PDF-item estimates so searching a
           // large document never builds every text layer. Once a visible page
@@ -1390,6 +1402,7 @@ export class LumenPdfView extends FileView {
     state.textTask = undefined;
     state.textReady = false;
     state.searchTextRuns = undefined;
+    state.quoteTextRuns = undefined;
     state.textHost?.empty();
   }
 
@@ -1837,8 +1850,8 @@ export class LumenPdfView extends FileView {
     if (!nativeSelection || nativeSelection.isCollapsed || !nativeSelection.rangeCount) return;
     const range = nativeSelection.getRangeAt(0).cloneRange();
     if (this.mobileRuntime && !this.selectionRangeBelongsToReader(range)) return;
-    const quote = range.toString().replace(/\s+/g, " ").trim();
-    if (!quote) return;
+    const rawQuote = normalizeQuoteText(range.toString());
+    if (!rawQuote) return;
     // PDF.js can represent punctuation and narrow glyphs as sub-pixel or even
     // zero-width boundary rectangles. Discarding those anchors made the saved
     // quote include characters that the visible mark did not. Keep finite line
@@ -1852,6 +1865,7 @@ export class LumenPdfView extends FileView {
       && rect.height > 0);
     if (!rects.length) return;
     const byPage = new Map<number, NormalizedRect[]>();
+    const quoteRanges = new Map<number, AnnotationQuoteRange[]>();
     const [firstPage, lastPage] = this.pageRangeForClientRects(rects);
     for (let pageNumber = firstPage; pageNumber <= lastPage; pageNumber++) {
       const state = this.pages.get(pageNumber);
@@ -1871,15 +1885,46 @@ export class LumenPdfView extends FileView {
           height: (bottom - top) / pageRect.height,
         });
       }
-      if (normalized.length) byPage.set(state.pageNumber, this.coalesceSelectionRects(normalized));
+      const coalesced = this.coalesceSelectionRects(normalized);
+      if (coalesced.length) {
+        byPage.set(state.pageNumber, coalesced);
+        const ranges = this.selectedQuoteRanges(state, range);
+        if (ranges.length) quoteRanges.set(state.pageNumber, ranges);
+      }
     }
     if (!byPage.size) return;
+    const quote = quoteRanges.size === byPage.size ? quoteFromPageRanges(quoteRanges) : rawQuote;
+    if (!quote) return;
     const selectionBounds = range.getBoundingClientRect();
     const x = Number.isFinite(clientX) ? clientX! : selectionBounds.left + selectionBounds.width / 2;
     const y = Number.isFinite(clientY) ? clientY! : selectionBounds.bottom;
-    this.selection = { quote, pages: byPage, x, y };
+    this.selection = { quote, pages: byPage, quoteRanges, nativeRange: range, x, y };
     if (this.extensionGroupId) this.showExtensionPalette();
     else this.showSelectionPalette();
+  }
+
+  private selectedQuoteRanges(state: PageState, selection: Range): AnnotationQuoteRange[] {
+    const runs = state.quoteTextRuns ?? [];
+    const slices: QuoteRunSlice[] = [];
+    const doc = state.shell.ownerDocument;
+    for (let index = 0; index < runs.length; index++) {
+      const run = runs[index];
+      if (!run.text || !selection.intersectsNode(run.element)) continue;
+      const clipped = doc.createRange();
+      clipped.selectNodeContents(run.element);
+      if (selection.compareBoundaryPoints(Range.START_TO_START, clipped) > 0) {
+        clipped.setStart(selection.startContainer, selection.startOffset);
+      }
+      if (selection.compareBoundaryPoints(Range.END_TO_END, clipped) < 0) {
+        clipped.setEnd(selection.endContainer, selection.endOffset);
+      }
+      const prefix = doc.createRange();
+      prefix.selectNodeContents(run.element);
+      prefix.setEnd(clipped.startContainer, clipped.startOffset);
+      const start = prefix.toString().length;
+      slices.push({ index, start, end: start + clipped.toString().length });
+    }
+    return quoteRangesForSlices(runs, slices);
   }
 
   private selectionRangeBelongsToReader(range: Range): boolean {
@@ -1909,8 +1954,11 @@ export class LumenPdfView extends FileView {
         if (!this.selectionPalette) this.selection = null;
         return;
       }
-      const quote = selection.getRangeAt(0).toString().replace(/\s+/g, " ").trim();
-      if (this.selectionPalette && quote && quote === this.selection?.quote) return;
+      const range = selection.getRangeAt(0);
+      const captured = this.selection?.nativeRange;
+      if (this.selectionPalette && captured
+        && range.startContainer === captured.startContainer && range.startOffset === captured.startOffset
+        && range.endContainer === captured.endContainer && range.endOffset === captured.endOffset) return;
       this.captureSelection(clientX, clientY);
     }, delay);
   }
@@ -2082,16 +2130,12 @@ export class LumenPdfView extends FileView {
     const groupId = this.extensionGroupId;
     const template = this.index.get(groupId) ?? members[0];
     const now = Date.now();
-    const normalizedExtension = selection.quote.replace(/\s+/g, " ").trim();
-    const originalQuote = template.quote.replace(/\s+/g, " ").trim();
-    const mergedQuote = !normalizedExtension || originalQuote.includes(normalizedExtension)
-      ? originalQuote
-      : `${originalQuote} ${normalizedExtension}`.trim();
+    const merged = extendAnnotationQuote(members, template.quote, selection.quote, selection.pages, selection.quoteRanges);
     const byPage = new Map<number, PdfAnnotation>();
     for (const member of members) if (!byPage.has(member.page)) byPage.set(member.page, member);
     const updated = new Map<string, PdfAnnotation>();
     for (const member of members) {
-      updated.set(member.id, { ...member, groupId, quote: mergedQuote, updatedAt: now });
+      updated.set(member.id, { ...member, groupId, quote: merged.quote, quoteRanges: merged.rangesByPage?.get(member.page), updatedAt: now });
     }
     for (const [page, rects] of selection.pages) {
       const existing = byPage.get(page);
@@ -2099,13 +2143,15 @@ export class LumenPdfView extends FileView {
         updated.set(existing.id, {
           ...existing,
           groupId,
-          quote: mergedQuote,
+          quote: merged.quote,
+          quoteRanges: merged.rangesByPage?.get(page),
           rects: this.mergeAnnotationRects(existing.rects, rects),
           updatedAt: now,
         });
       } else {
-        const continuation = newAnnotation(page, this.mergeAnnotationRects([], rects), mergedQuote, template.color, template.style);
+        const continuation = newAnnotation(page, this.mergeAnnotationRects([], rects), merged.quote, template.color, template.style);
         continuation.groupId = groupId;
+        continuation.quoteRanges = merged.rangesByPage?.get(page);
         continuation.note = template.note;
         continuation.tags = template.tags.slice();
         updated.set(continuation.id, continuation);
@@ -2148,13 +2194,19 @@ export class LumenPdfView extends FileView {
 
   private commitSelection(style: MarkStyle, color: string, openEditor: boolean): void {
     if (!this.selection || !this.bundle) return;
-    let first: PdfAnnotation | null = null;
+    const annotations: PdfAnnotation[] = [];
+    const hasCompleteRanges = this.selection.quoteRanges.size === this.selection.pages.size;
     for (const [page, rects] of this.selection.pages) {
       const annotation = newAnnotation(page, rects, this.selection.quote, color, style);
+      if (hasCompleteRanges) annotation.quoteRanges = this.selection.quoteRanges.get(page);
+      annotations.push(annotation);
+    }
+    const first = annotations[0];
+    for (const annotation of annotations) {
+      if (annotations.length > 1) annotation.groupId = first.id;
       this.index.put(annotation);
       this.bundle.repository.queue({ op: "put", annotation });
-      this.renderMarks(page);
-      first ??= annotation;
+      this.renderMarks(annotation.page);
     }
     if (this.mobileRuntime) this.containerEl.ownerDocument.defaultView?.getSelection()?.removeAllRanges();
     else window.getSelection()?.removeAllRanges();
@@ -2525,7 +2577,7 @@ export class LumenPdfView extends FileView {
       }
     }
     if (annotation.kind !== "page-note") {
-      const quote = container.createDiv({ cls: "lumen-editor-quote", text: annotation.quote });
+      const quote = container.createDiv({ cls: "lumen-editor-quote", text: annotation.quote, attr: { tabindex: "0", "aria-label": "Quoted text" } });
       if (compact) quote.classList.add("is-compact");
     }
     const note = container.createEl("textarea", { cls: "lumen-note-input", attr: { placeholder: annotation.kind === "page-note" ? "Page note…" : "Add a note…", "aria-label": annotation.kind === "page-note" ? "Page note" : "Annotation note" } });
@@ -2681,6 +2733,7 @@ export class LumenPdfView extends FileView {
     for (let offset = 0; offset < windowItems.length; offset++) {
       const item = windowItems[offset];
       const card = window.createDiv({ cls: "lumen-annotation-card" });
+      card.classList.toggle("has-note", Boolean(item.note));
       if (this.mobileRuntime) {
         card.tabIndex = 0;
         card.setAttribute("role", "button");
@@ -2697,8 +2750,8 @@ export class LumenPdfView extends FileView {
         edit.addEventListener("keydown", event => event.stopPropagation());
         meta.append(edit);
       }
-      card.createDiv({ cls: "lumen-card-note", text: item.note || item.quote });
-      if (item.note) card.createDiv({ cls: "lumen-card-quote", text: item.quote });
+      if (item.kind !== "page-note") card.createDiv({ cls: "lumen-card-quote", text: item.quote });
+      if (item.note || item.kind === "page-note") card.createDiv({ cls: "lumen-card-note", text: item.note || "Page note" });
       const activate = () => {
         this.goToPage(item.page, "smooth", this.mobileRuntime ? item.rects[0]?.y : undefined);
         this.flashAnnotation(item.id);
