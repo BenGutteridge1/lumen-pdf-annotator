@@ -1269,6 +1269,15 @@
   transition: none;
 }
 
+/* Scale every existing page layer together while a desktop pinch is active.
+ * Shells use the live zoom for scrolling/anchoring; PDF.js paints once it ends. */
+.lumen-reader.is-zooming .lumen-page-stage {
+  width: calc(var(--lumen-page-width) * var(--lumen-render-zoom));
+  height: calc(var(--lumen-page-height) * var(--lumen-render-zoom));
+  transform: scale(var(--lumen-zoom-preview, 1));
+  transform-origin: top left;
+}
+
 /*
  * Obsidian themes may apply broad control styles after plugin styles load.
  * The reserved selector token is not used in Lumen's DOM; :not() therefore

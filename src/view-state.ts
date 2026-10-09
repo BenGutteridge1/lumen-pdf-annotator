@@ -96,6 +96,7 @@ export class PdfViewStateManager {
       scroll.addEventListener("scroll", captureLater, { passive: true });
       pageInput?.addEventListener("change", captureLater);
       zoomButtons.forEach(button => button.addEventListener("click", captureLater));
+      root.addEventListener("lumen-zoom-change", captureLater);
       this.activeCaptures.set(root, captureNow);
     };
 
@@ -114,6 +115,7 @@ export class PdfViewStateManager {
       scroll.removeEventListener("scroll", captureLater);
       pageInput?.removeEventListener("change", captureLater);
       zoomButtons.forEach(button => button.removeEventListener("click", captureLater));
+      root.removeEventListener("lumen-zoom-change", captureLater);
       resizeObserver?.disconnect();
       mutationObserver?.disconnect();
       this.pendingRestores.delete(root);
@@ -149,12 +151,11 @@ export class PdfViewStateManager {
   }
 
   private async restore(view: LumenPdfView, root: HTMLElement, state: PdfViewState): Promise<boolean> {
-    const zoomLabel = root.querySelector<HTMLElement>(".lumen-zoom-label");
     const savedZoom = Number.isFinite(state.zoom) ? state.zoom : 1.25;
-    const roundedZoom = view.isMobileView() ? Math.round(savedZoom * 20) / 20 : Math.round(savedZoom * 4) / 4;
+    const roundedZoom = view.isMobileView() ? Math.round(savedZoom * 20) / 20 : Math.round(savedZoom * 100) / 100;
     const desiredZoom = Math.max(view.minimumZoom(), Math.min(4, roundedZoom));
     const page = Math.max(1, Math.round(Number.isFinite(state.page) ? state.page : 1));
-    const currentZoom = Number.parseInt(zoomLabel?.textContent ?? "125", 10) / 100;
+    const currentZoom = view.currentZoom();
     if (view.isMobileView() || Math.abs(desiredZoom - currentZoom) >= 0.001) {
       await view.restoreZoom(desiredZoom, Boolean(state.mobileFit));
     }
@@ -170,7 +171,7 @@ export class PdfViewStateManager {
     if (!allowDetached && (!root.isConnected || !root.clientWidth || !scroll?.clientHeight
       || root.ownerDocument.defaultView?.getComputedStyle(root).visibility === "hidden")) return;
     const page = Number.parseInt(root.querySelector<HTMLInputElement>(".lumen-page-input")?.value ?? "1", 10);
-    const zoom = Number.parseInt(root.querySelector<HTMLElement>(".lumen-zoom-label")?.textContent ?? "125", 10) / 100;
+    const zoom = Math.round(view.currentZoom(root) * 100) / 100;
     if (!Number.isFinite(page) || !Number.isFinite(zoom)) return;
     this.data.pdfs[stateKey(view, path)] = {
       page: Math.max(1, page),
