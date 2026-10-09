@@ -3,38 +3,21 @@ import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { builtinModules, createRequire } from "node:module";
+import { buildPdfWorker, portablePromises, PDFJS_VERSION } from "./build/pdfjs-worker.mjs";
 
 const require = createRequire(import.meta.url);
 const production = process.argv[2] === "production";
 const outputDirectory = process.env.LUMEN_PDF_ANNOTATOR_PLUGIN_DIR ?? path.resolve("dist");
-const workerPath = require.resolve("pdfjs-dist/build/pdf.worker.min.mjs");
+const workerPath = require.resolve("pdfjs-dist/build/pdf.worker.mjs");
+const pdfjsVersion = JSON.parse(fs.readFileSync(require.resolve("pdfjs-dist/package.json"), "utf8")).version;
+if (pdfjsVersion !== PDFJS_VERSION) throw new Error(`Expected PDF.js ${PDFJS_VERSION}, found ${pdfjsVersion}`);
 fs.mkdirSync(outputDirectory, { recursive: true });
-
-function replacePromiseCapabilities(source, filename) {
-  const nativeCall = "Promise.withResolvers()";
-  const helper = "function lumenPromiseWithResolvers(){let resolve,reject;const promise=new Promise((accept,decline)=>{resolve=accept;reject=decline});return{promise,resolve,reject}}\n";
-  const result = source.replaceAll(nativeCall, "lumenPromiseWithResolvers()");
-  if (result.includes(nativeCall)) throw new Error(`Unable to make PDF.js promise capabilities portable in ${filename}`);
-  return helper + result;
-}
 
 function sanitizeApi(source, filename) {
   const before = `function isEvalSupported() {\n  try {\n    new Function(\"\");\n    return true;\n  } catch {\n    return false;\n  }\n}`;
   const after = `function isEvalSupported() {\n  return false;\n}`;
   if (!source.includes(before)) throw new Error(`Unable to disable PDF.js eval probe in ${filename}`);
-  const result = replacePromiseCapabilities(source.replace(before, after), filename);
-  if (result.includes("new Function") || result.includes("eval(")) throw new Error(`Runtime code generation remains in ${filename}`);
-  return result;
-}
-
-function sanitizeWorker(source, filename) {
-  const evalProbe = `function isEvalSupported(){try{new Function(\"\");return!0}catch{return!1}}`;
-  const postScript = `if(t&&FeatureTest.isEvalSupported){const e=(new PostScriptCompiler).compile(g,s,r);if(e)return new Function(\"src\",\"srcOffset\",\"dest\",\"destOffset\",e)}`;
-  if (!source.includes(evalProbe) || !source.includes(postScript)) throw new Error(`Unexpected PDF.js worker layout in ${filename}`);
-  const result = replacePromiseCapabilities(
-    source.replace(evalProbe, `function isEvalSupported(){return!1}`).replace(postScript, `if(false){}`),
-    filename,
-  );
+  const result = portablePromises(source.replace(before, after), filename);
   if (result.includes("new Function") || result.includes("eval(")) throw new Error(`Runtime code generation remains in ${filename}`);
   return result;
 }
@@ -44,7 +27,7 @@ const pdfPlugin = {
   setup(build) {
     build.onResolve({ filter: /^lumen-pdf-worker$/ }, () => ({ path: workerPath, namespace: "lumen-worker" }));
     build.onLoad({ filter: /.*/, namespace: "lumen-worker" }, args => ({
-      contents: sanitizeWorker(fs.readFileSync(args.path, "utf8"), args.path),
+      contents: buildPdfWorker(fs.readFileSync(args.path, "utf8"), pdfjsVersion),
       loader: "text",
     }));
     build.onLoad({ filter: /pdfjs-dist[/\\]build[/\\]pdf\.mjs$/ }, args => ({

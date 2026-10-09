@@ -20,7 +20,7 @@ async function bundledModule(entry, stubObsidian = false) {
 
 const {
   buildQuoteTextRuns, extendAnnotationQuote, extendLegacyQuote, mergeQuoteRanges,
-  normalizeQuoteRanges, normalizeQuoteText, quoteFromPageRanges, quoteRangesForSlices,
+  normalizeQuoteRanges, normalizeQuoteText, quoteAnchorFields, quoteFromPageRanges, quoteRangesForSlices, quoteRangeVersionForItems,
 } = await bundledModule('src/annotation-text.ts');
 const { AnnotationIndex } = await bundledModule('src/model.ts');
 const { AnnotationRepository } = await bundledModule('src/storage.ts', true);
@@ -217,4 +217,73 @@ test('invalid optional ranges do not discard annotations from storage', async ()
   const { vault } = memoryVault({ 'bundle/annotations.snapshot.json': JSON.stringify([damaged]) });
   const index = await new AnnotationRepository(vault, 'bundle', 'hash', 'Document.pdf').load();
   assert.deepEqual(JSON.parse(JSON.stringify(index.get(valid.id))), valid);
+});
+
+test('expanded page offsets carry a page version even when selection follows the repaired run', () => {
+  assert.equal(quoteRangeVersionForItems([item('unaffected')]), 1);
+  const items = [{ ...item('fi'), lumenTextRepaired: true }, item('the', { x: 30 })];
+  assert.equal(quoteRangeVersionForItems(items), 2);
+  const runs = buildQuoteTextRuns(items);
+  const selected = quoteRangesForSlices(runs, [{ index: 1, start: 0, end: 3 }]);
+  assert.equal(selected[0].text.length, selected[0].end - selected[0].start);
+});
+
+test('old and repaired offsets never union even when repeated words have identical text and offsets', () => {
+  const old = annotation({ quote: 'the', quoteRanges: [range(4, 'the')], rects: [rect(.1, .2)] });
+  const result = extendAnnotationQuote([old], 'the', 'the', new Map([[1, [rect(.1, .4)]]]),
+    new Map([[1, [range(4, 'the')]]]), new Map([[1, 2]]));
+  assert.deepEqual(result, { quote: 'the the' });
+  assert.deepEqual(quoteAnchorFields(result.rangesByPage?.get(1), result.versionsByPage?.get(1)),
+    { quoteRanges: undefined, repairedQuoteRanges: undefined, quoteRangeVersion: undefined });
+});
+
+test('repaired anchors union exact overlap and keep unaffected pages in the original format', () => {
+  const repaired = annotation({ quote: 'had finally', repairedQuoteRanges: [range(4, 'had finally')], quoteRangeVersion: 2 });
+  const result = extendAnnotationQuote([repaired], repaired.quote, 'who had', new Map([[1, [rect()]]]),
+    new Map([[1, [range(0, 'who had')]]]), new Map([[1, 2]]));
+  assert.equal(result.quote, 'who had finally');
+  assert.deepEqual(result.rangesByPage.get(1), [range(0, 'who had finally')]);
+  assert.deepEqual(quoteAnchorFields(result.rangesByPage.get(1), result.versionsByPage.get(1)),
+    { quoteRanges: undefined, repairedQuoteRanges: [range(0, 'who had finally')], quoteRangeVersion: 2 });
+  const unaffected = annotation({ quote: 'had', quoteRanges: [range(4, 'had')] });
+  const crossPage = extendAnnotationQuote([unaffected], 'had', 'finally', new Map([[2, [rect()]]]),
+    new Map([[2, [range(0, 'finally')]]]), new Map([[2, 2]]));
+  assert.deepEqual(quoteAnchorFields(crossPage.rangesByPage.get(1), crossPage.versionsByPage.get(1)),
+    { quoteRanges: [range(4, 'had')], repairedQuoteRanges: undefined, quoteRangeVersion: undefined });
+  assert.equal(crossPage.versionsByPage.get(2), 2);
+});
+
+test('repaired range storage round-trips journals/checkpoints with no legacy shifted anchors', async () => {
+  const record = annotation({ quote: 'the', repairedQuoteRanges: [range(4, 'the')], quoteRangeVersion: 2 });
+  const { vault, data } = memoryVault();
+  const index = new AnnotationIndex(); index.put(record);
+  let repository = new AnnotationRepository(vault, 'bundle', 'hash', 'Document.pdf');
+  repository.queue({ op: 'put', annotation: record }); await repository.flushJournal();
+  repository = new AnnotationRepository(vault, 'bundle', 'hash', 'Document.pdf');
+  const restored = await repository.load();
+  assert.deepEqual(JSON.parse(JSON.stringify(restored.get(record.id))), record);
+  await repository.checkpoint(restored);
+  const saved = JSON.parse(data.get('bundle/annotations.snapshot.json'))[0];
+  assert.equal(Object.hasOwn(saved, 'quoteRanges'), false);
+  assert.equal(saved.quoteRangeVersion, 2);
+  assert.deepEqual(saved.repairedQuoteRanges, record.repairedQuoteRanges);
+  // 1.0.20 only recognizes quoteRanges. Its load/checkpoint drops the two new
+  // optional fields, preserving the quote/geometry and taking the legacy path.
+  const { repairedQuoteRanges, quoteRangeVersion, ...oldReaderRecord } = saved;
+  assert.ok(repairedQuoteRanges); assert.equal(quoteRangeVersion, 2);
+  const oldReaderExtension = extendAnnotationQuote([oldReaderRecord], 'the', 'the',
+    new Map([[1, [rect(.1, .5)]]]), new Map([[1, [range(4, 'the')]]]));
+  assert.deepEqual(oldReaderExtension, { quote: 'the the' });
+});
+
+test('unknown repaired versions and corrupt repaired ranges keep saved quotes without unsafe anchors', async () => {
+  const original = annotation();
+  for (const invalid of [
+    { ...original, quoteRanges: [range(0, 'the')], repairedQuoteRanges: [range(0, 'the')], quoteRangeVersion: 3 },
+    { ...original, repairedQuoteRanges: [{ start: 0, end: 1, text: 'bad' }], quoteRangeVersion: 2 },
+  ]) {
+    const { vault } = memoryVault({ 'bundle/annotations.snapshot.json': JSON.stringify([invalid]) });
+    const loaded = await new AnnotationRepository(vault, 'bundle', 'hash', 'Document.pdf').load();
+    assert.deepEqual(JSON.parse(JSON.stringify(loaded.get(original.id))), original);
+  }
 });

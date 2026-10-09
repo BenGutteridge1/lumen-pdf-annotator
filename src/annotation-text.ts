@@ -11,6 +11,22 @@ export interface QuoteRunSlice {
   end: number;
 }
 
+export type QuoteRangeVersion = 1 | 2;
+
+/** Version a whole page, since one expanded glyph shifts all following offsets. */
+export function quoteRangeVersionForItems(items: readonly TextItem[]): QuoteRangeVersion {
+  return items.some(item => (item as TextItem & { lumenTextRepaired?: boolean }).lumenTextRepaired === true) ? 2 : 1;
+}
+
+export function quoteAnchorFields(ranges: AnnotationQuoteRange[] | undefined, version: QuoteRangeVersion | undefined):
+Pick<PdfAnnotation, "quoteRanges" | "repairedQuoteRanges" | "quoteRangeVersion"> {
+  return {
+    quoteRanges: version === 1 ? ranges : undefined,
+    repairedQuoteRanges: version === 2 ? ranges : undefined,
+    quoteRangeVersion: ranges && version === 2 ? 2 : undefined,
+  };
+}
+
 const LATIN_LIGATURES: Record<string, string> = {
   "ﬀ": "ff", "ﬁ": "fi", "ﬂ": "fl", "ﬃ": "ffi", "ﬄ": "ffl", "ﬅ": "st", "ﬆ": "st",
 };
@@ -188,6 +204,7 @@ export function extendLegacyQuote(
 export interface ExtendedQuote {
   quote: string;
   rangesByPage?: Map<number, AnnotationQuoteRange[]>;
+  versionsByPage?: Map<number, QuoteRangeVersion>;
 }
 
 export function extendAnnotationQuote(
@@ -196,11 +213,21 @@ export function extendAnnotationQuote(
   selectionQuote: string,
   selectionPages: ReadonlyMap<number, readonly NormalizedRect[]>,
   selectedRanges: ReadonlyMap<number, readonly AnnotationQuoteRange[]>,
+  selectedVersions: ReadonlyMap<number, QuoteRangeVersion> = new Map(),
 ): ExtendedQuote {
   const existing = new Map<number, AnnotationQuoteRange[]>();
+  const versions = new Map<number, QuoteRangeVersion>();
   for (const member of members) {
-    const ranges = normalizeQuoteRanges(member.quoteRanges);
+    const ranges = normalizeQuoteRanges(member.quoteRangeVersion === 2 ? member.repairedQuoteRanges : member.quoteRanges);
     if (!ranges) return { quote: extendLegacyQuote(originalQuote, selectionQuote, members, selectionPages) };
+    const version = member.quoteRangeVersion ?? 1;
+    // Equality of the strings is insufficient: a repaired glyph earlier on
+    // the page can shift an unrelated, repeated word into the old offset.
+    if ((versions.has(member.page) && versions.get(member.page) !== version)
+      || (selectedRanges.has(member.page) && (selectedVersions.get(member.page) ?? 1) !== version)) {
+      return { quote: extendLegacyQuote(originalQuote, selectionQuote, members, selectionPages) };
+    }
+    versions.set(member.page, version);
     existing.set(member.page, [...existing.get(member.page) ?? [], ...ranges]);
   }
   for (const [page, ranges] of existing) {
@@ -218,6 +245,7 @@ export function extendAnnotationQuote(
     const merged = mergeQuoteRanges([...existing.get(page) ?? [], ...ranges]);
     if (!merged) return { quote: extendLegacyQuote(originalQuote, selectionQuote, members, selectionPages) };
     existing.set(page, merged);
+    versions.set(page, selectedVersions.get(page) ?? 1);
   }
-  return { quote: quoteFromPageRanges(existing), rangesByPage: existing };
+  return { quote: quoteFromPageRanges(existing), rangesByPage: existing, versionsByPage: versions };
 }
