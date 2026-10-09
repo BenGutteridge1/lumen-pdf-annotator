@@ -569,6 +569,11 @@
 .lumen-virtual-spacer {
   position: relative;
   width: 100%;
+  flex-shrink: 0;
+  overflow-anchor: none;
+}
+.lumen-inspector-list {
+  overflow-anchor: none;
 }
 .lumen-virtual-window {
   position: absolute;

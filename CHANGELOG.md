@@ -2,6 +2,12 @@
 
 All notable changes to Lumen PDF Annotator are documented here.
 
+## 1.0.21 — 2026-10-09
+
+- Recover selectable text, PDF search and newly selected quotes when an embedded TrueType font supplies validated standard glyph names for a missing or NUL Unicode mapping. Recovery uses the bundled PDF worker, leaves painted glyphs and source PDFs unchanged, and runs without OCR or downloads.
+- Preserve old saved quotes and annotations. Page range versions prevent old offsets from being combined with expanded repaired text; extending such a mark uses its saved geometry. Unaffected pages retain exact range-based overlap handling.
+- Keep the annotation inspector's virtual scroll spacer mounted while cards update, fixing a scrollbar that jumps back before the list advances (issue #14).
+
 ## 1.0.20 — 2026-10-08
 
 - Preserved word spacing across selected PDF lines and expanded correctly mapped Latin ligatures without changing mathematical or superscript characters. Unmapped glyphs appear as `�` rather than silently disappearing; PDFs with missing character mappings still require a corrected text layer to recover their letters.

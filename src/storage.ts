@@ -212,7 +212,9 @@ function normalizeAnnotation(value: unknown): PdfAnnotation | null {
   if (!rects.length) return null;
   const createdAt = finite(item.createdAt, Date.now());
   const style = isMarkStyle(item.style) ? item.style : "highlight";
-  const quoteRanges = normalizeQuoteRanges(item.quoteRanges);
+  // Unknown future offset schemes cannot safely be treated as original text.
+  const quoteRanges = item.quoteRangeVersion === undefined ? normalizeQuoteRanges(item.quoteRanges) : undefined;
+  const repairedQuoteRanges = item.quoteRangeVersion === 2 ? normalizeQuoteRanges(item.repairedQuoteRanges) : undefined;
   return {
     id: item.id,
     groupId: typeof item.groupId === "string" && item.groupId.trim() ? item.groupId : undefined,
@@ -221,6 +223,7 @@ function normalizeAnnotation(value: unknown): PdfAnnotation | null {
     rects,
     quote: typeof item.quote === "string" ? item.quote : item.kind === "page-note" ? "Page note" : "",
     ...(quoteRanges ? { quoteRanges } : {}),
+    ...(repairedQuoteRanges ? { repairedQuoteRanges, quoteRangeVersion: 2 as const } : {}),
     note: typeof item.note === "string" ? item.note : "",
     tags: Array.isArray(item.tags) ? item.tags.filter((tag): tag is string => typeof tag === "string") : [],
     color: typeof item.color === "string" && item.color.trim() ? item.color : MARK_COLORS[0],

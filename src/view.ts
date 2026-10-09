@@ -3,7 +3,7 @@ import type { PDFDocumentProxy, PDFPageProxy, PDFWorker, RenderTask, TextContent
 import type { TextLayer } from "pdfjs-dist/types/src/display/text_layer";
 import { annotationMarkdownLink } from "./links";
 import { AnnotationIndex, AnnotationQuoteRange, MARK_COLORS, MarkStyle, newAnnotation, newPageNote, NormalizedRect, PdfAnnotation } from "./model";
-import { buildQuoteTextRuns, extendAnnotationQuote, normalizeQuoteText, quoteFromPageRanges, quoteRangesForSlices, QuoteRunSlice, QuoteTextRun } from "./annotation-text";
+import { buildQuoteTextRuns, extendAnnotationQuote, normalizeQuoteText, quoteAnchorFields, quoteFromPageRanges, quoteRangesForSlices, quoteRangeVersionForItems, QuoteRangeVersion, QuoteRunSlice, QuoteTextRun } from "./annotation-text";
 import { annotationTarget, comparableFileName, QuoteAnnotationRecord, quoteAnnotations } from "./legacy";
 import { loadPdf } from "./pdf-runtime";
 import {
@@ -96,12 +96,14 @@ interface PageState {
   markWideHits?: PdfAnnotation[];
   searchTextRuns?: SearchTextRun[];
   quoteTextRuns?: QuoteDomRun[];
+  quoteRangeVersion?: QuoteRangeVersion;
 }
 
 interface PendingSelection {
   quote: string;
   pages: Map<number, NormalizedRect[]>;
   quoteRanges: Map<number, AnnotationQuoteRange[]>;
+  quoteRangeVersions: Map<number, QuoteRangeVersion>;
   nativeRange: Range;
   x: number;
   y: number;
@@ -1187,6 +1189,7 @@ export class LumenPdfView extends FileView {
     state.markHost = null;
     state.searchTextRuns = undefined;
     state.quoteTextRuns = undefined;
+    state.quoteRangeVersion = undefined;
   }
 
   private schedulePageMount(state: PageState): void {
@@ -1374,6 +1377,7 @@ export class LumenPdfView extends FileView {
           state.quoteTextRuns = buildQuoteTextRuns(textContent.items.filter(isPdfTextItem))
             .map((run, index) => ({ ...run, element: textLayer.textDivs[index] }))
             .filter(run => run.element?.isConnected && run.element.textContent === run.text);
+          state.quoteRangeVersion = quoteRangeVersionForItems(textContent.items.filter(isPdfTextItem));
           state.textReady = true;
           // Initial search marks use cheap PDF-item estimates so searching a
           // large document never builds every text layer. Once a visible page
@@ -1403,6 +1407,7 @@ export class LumenPdfView extends FileView {
     state.textReady = false;
     state.searchTextRuns = undefined;
     state.quoteTextRuns = undefined;
+    state.quoteRangeVersion = undefined;
     state.textHost?.empty();
   }
 
@@ -1866,6 +1871,7 @@ export class LumenPdfView extends FileView {
     if (!rects.length) return;
     const byPage = new Map<number, NormalizedRect[]>();
     const quoteRanges = new Map<number, AnnotationQuoteRange[]>();
+    const quoteRangeVersions = new Map<number, QuoteRangeVersion>();
     const [firstPage, lastPage] = this.pageRangeForClientRects(rects);
     for (let pageNumber = firstPage; pageNumber <= lastPage; pageNumber++) {
       const state = this.pages.get(pageNumber);
@@ -1889,7 +1895,10 @@ export class LumenPdfView extends FileView {
       if (coalesced.length) {
         byPage.set(state.pageNumber, coalesced);
         const ranges = this.selectedQuoteRanges(state, range);
-        if (ranges.length) quoteRanges.set(state.pageNumber, ranges);
+        if (ranges.length) {
+          quoteRanges.set(state.pageNumber, ranges);
+          quoteRangeVersions.set(state.pageNumber, state.quoteRangeVersion ?? 1);
+        }
       }
     }
     if (!byPage.size) return;
@@ -1898,7 +1907,7 @@ export class LumenPdfView extends FileView {
     const selectionBounds = range.getBoundingClientRect();
     const x = Number.isFinite(clientX) ? clientX! : selectionBounds.left + selectionBounds.width / 2;
     const y = Number.isFinite(clientY) ? clientY! : selectionBounds.bottom;
-    this.selection = { quote, pages: byPage, quoteRanges, nativeRange: range, x, y };
+    this.selection = { quote, pages: byPage, quoteRanges, quoteRangeVersions, nativeRange: range, x, y };
     if (this.extensionGroupId) this.showExtensionPalette();
     else this.showSelectionPalette();
   }
@@ -2130,12 +2139,13 @@ export class LumenPdfView extends FileView {
     const groupId = this.extensionGroupId;
     const template = this.index.get(groupId) ?? members[0];
     const now = Date.now();
-    const merged = extendAnnotationQuote(members, template.quote, selection.quote, selection.pages, selection.quoteRanges);
+    const merged = extendAnnotationQuote(members, template.quote, selection.quote, selection.pages, selection.quoteRanges, selection.quoteRangeVersions);
     const byPage = new Map<number, PdfAnnotation>();
     for (const member of members) if (!byPage.has(member.page)) byPage.set(member.page, member);
     const updated = new Map<string, PdfAnnotation>();
     for (const member of members) {
-      updated.set(member.id, { ...member, groupId, quote: merged.quote, quoteRanges: merged.rangesByPage?.get(member.page), updatedAt: now });
+      updated.set(member.id, { ...member, groupId, quote: merged.quote,
+        ...quoteAnchorFields(merged.rangesByPage?.get(member.page), merged.versionsByPage?.get(member.page)), updatedAt: now });
     }
     for (const [page, rects] of selection.pages) {
       const existing = byPage.get(page);
@@ -2144,14 +2154,14 @@ export class LumenPdfView extends FileView {
           ...existing,
           groupId,
           quote: merged.quote,
-          quoteRanges: merged.rangesByPage?.get(page),
+          ...quoteAnchorFields(merged.rangesByPage?.get(page), merged.versionsByPage?.get(page)),
           rects: this.mergeAnnotationRects(existing.rects, rects),
           updatedAt: now,
         });
       } else {
         const continuation = newAnnotation(page, this.mergeAnnotationRects([], rects), merged.quote, template.color, template.style);
         continuation.groupId = groupId;
-        continuation.quoteRanges = merged.rangesByPage?.get(page);
+        Object.assign(continuation, quoteAnchorFields(merged.rangesByPage?.get(page), merged.versionsByPage?.get(page)));
         continuation.note = template.note;
         continuation.tags = template.tags.slice();
         updated.set(continuation.id, continuation);
@@ -2198,7 +2208,9 @@ export class LumenPdfView extends FileView {
     const hasCompleteRanges = this.selection.quoteRanges.size === this.selection.pages.size;
     for (const [page, rects] of this.selection.pages) {
       const annotation = newAnnotation(page, rects, this.selection.quote, color, style);
-      if (hasCompleteRanges) annotation.quoteRanges = this.selection.quoteRanges.get(page);
+      if (hasCompleteRanges) {
+        Object.assign(annotation, quoteAnchorFields(this.selection.quoteRanges.get(page), this.selection.quoteRangeVersions.get(page)));
+      }
       annotations.push(annotation);
     }
     const first = annotations[0];
@@ -2699,11 +2711,11 @@ export class LumenPdfView extends FileView {
     const directWindow = this.usesDirectInspectorWindow();
     const filteredItems = directWindow ? null : this.filteredAnnotations();
     const itemCount = directWindow ? this.index.logicalSize : filteredItems?.length ?? 0;
-    // Read current layout before replacing the window. Initial opening passes
+    // Read current layout before replacing the cards. Initial opening passes
     // explicit values, so it performs no synchronous layout reads at all.
     const scrollTop = scrollTopOverride ?? this.inspectorList.scrollTop;
-    this.inspectorList.empty();
     if (!itemCount) {
+      this.inspectorList.empty();
       this.inspectorList.createDiv({ cls: "lumen-empty", text: "No matching annotations" });
       return;
     }
@@ -2722,9 +2734,18 @@ export class LumenPdfView extends FileView {
     const windowItems = directWindow
       ? this.index.logicalSlice(start, end, this.inspectorSort === "newest")
       : filteredItems?.slice(start, end) ?? [];
-    const spacer = this.inspectorList.createDiv({ cls: "lumen-virtual-spacer" });
+    // Keep the scroll extent mounted while replacing virtual cards. Removing
+    // the spacer on each scroll collapses scrollHeight and clamps scrollTop
+    // to zero in Chromium/WebViews, so the scrollbar jumps back (issue #14).
+    let spacer = this.inspectorList.querySelector<HTMLElement>(":scope > .lumen-virtual-spacer");
+    if (!spacer) {
+      this.inspectorList.empty();
+      spacer = this.inspectorList.createDiv({ cls: "lumen-virtual-spacer" });
+    }
     spacer.style.height = `${virtualHeight}px`;
-    const window = spacer.createDiv({ cls: "lumen-virtual-window" });
+    let window = spacer.querySelector<HTMLElement>(":scope > .lumen-virtual-window");
+    if (!window) window = spacer.createDiv({ cls: "lumen-virtual-window" });
+    else window.empty();
     const windowHeight = (end - start) * CARD_HEIGHT;
     const windowTop = logicalHeight <= virtualHeight
       ? start * CARD_HEIGHT

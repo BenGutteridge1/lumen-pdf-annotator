@@ -23,6 +23,10 @@ export interface PdfAnnotation {
   quote: string;
   // Optional, additive anchors. Older snapshots/readers still use `quote`.
   quoteRanges?: AnnotationQuoteRange[];
+  // Separate field: readers before font repair must not interpret v2 as v1.
+  repairedQuoteRanges?: AnnotationQuoteRange[];
+  // Absent means the original extraction offsets. Only repaired pages use v2.
+  quoteRangeVersion?: 2;
   note: string;
   tags: string[];
   color: string;
