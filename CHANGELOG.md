@@ -2,6 +2,11 @@
 
 All notable changes to Lumen PDF Annotator are documented here.
 
+## Unreleased
+
+- Add desktop trackpad pinch and Ctrl+wheel PDF zoom around the pointer, with 1% scale precision, saved zoom, and the existing 25% button stops (issue #15). Ordinary scrolling and mobile touch behavior remain unchanged.
+- Preview zoom by scaling the existing PDF, text, search and annotation layers together, then re-render nearby pages after the gesture settles.
+
 ## 1.0.21 — 2026-10-09
 
 - Recover selectable text, PDF search and newly selected quotes when an embedded TrueType font supplies validated standard glyph names for a missing or NUL Unicode mapping. Recovery uses the bundled PDF worker, leaves painted glyphs and source PDFs unchanged, and runs without OCR or downloads.

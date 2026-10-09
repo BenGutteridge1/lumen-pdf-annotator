@@ -6,6 +6,7 @@ import { AnnotationIndex, AnnotationQuoteRange, MARK_COLORS, MarkStyle, newAnnot
 import { buildQuoteTextRuns, extendAnnotationQuote, normalizeQuoteText, quoteAnchorFields, quoteFromPageRanges, quoteRangesForSlices, quoteRangeVersionForItems, QuoteRangeVersion, QuoteRunSlice, QuoteTextRun } from "./annotation-text";
 import { annotationTarget, comparableFileName, QuoteAnnotationRecord, quoteAnnotations } from "./legacy";
 import { loadPdf } from "./pdf-runtime";
+import { DesktopPdfZoom } from "./desktop-zoom";
 import {
   cacheOutlineHeadingLocation,
   centeredOutlineScrollTop,
@@ -107,6 +108,14 @@ interface PendingSelection {
   nativeRange: Range;
   x: number;
   y: number;
+}
+
+interface ZoomAnchor {
+  page: number;
+  xRatio: number;
+  yRatio: number;
+  viewportX: number;
+  viewportY: number;
 }
 
 interface QuoteDomRun extends QuoteTextRun {
@@ -278,6 +287,8 @@ export class LumenPdfView extends FileView {
   private readonly queuedPageMounts = new Set<PageState>();
   private activePageMounts = 0;
   private zoom = 1.25;
+  private desktopZoom: DesktopPdfZoom | null = null;
+  private desktopZoomPreview: number | null = null;
   private mobileFitMode = this.mobileRuntime;
   private baselineWidth = 760;
   private baselineHeight = 984;
@@ -530,8 +541,12 @@ export class LumenPdfView extends FileView {
 
   previousPage(): void { this.goToPage(this.currentPage - 1); }
   nextPage(): void { this.goToPage(this.currentPage + 1); }
-  zoomIn(): void { void this.setZoom(this.zoom + 0.25); }
-  zoomOut(): void { void this.setZoom(this.zoom - 0.25); }
+  zoomIn(): void {
+    void this.setZoom(this.mobileRuntime ? this.zoom + .25 : (Math.floor(this.currentZoom() * 4 + .0001) + 1) / 4);
+  }
+  zoomOut(): void {
+    void this.setZoom(this.mobileRuntime ? this.zoom - .25 : (Math.ceil(this.currentZoom() * 4 - .0001) - 1) / 4);
+  }
   resetZoom(): void {
     if (this.mobileRuntime) {
       this.mobileFitMode = true;
@@ -556,6 +571,15 @@ export class LumenPdfView extends FileView {
   isReaderReady(): boolean { return this.readerReady; }
   usesMobileFit(): boolean { return this.mobileRuntime && this.mobileFitMode; }
   minimumZoom(): number { return this.mobileRuntime ? 0.25 : 0.5; }
+  currentZoom(root = this.rootEl): number {
+    // A state-manager cleanup can run after this view has switched documents.
+    // Keep the old root's scale available without parsing its display label.
+    if (root && root !== this.rootEl) {
+      const previousZoom = Number(root.dataset.zoom);
+      if (Number.isFinite(previousZoom) && previousZoom > 0) return previousZoom;
+    }
+    return this.desktopZoomPreview ?? this.zoom;
+  }
 
   async revealAnnotation(idOrGroupId: string): Promise<boolean> {
     const members = this.index.inGroup(idOrGroupId);
@@ -600,9 +624,19 @@ export class LumenPdfView extends FileView {
     const appAccent = this.getAppAccentColor();
     if (appAccent) this.rootEl.style.setProperty("--lumen-accent", appAccent);
     this.rootEl.style.setProperty("--lumen-zoom", String(this.zoom));
+    this.rootEl.dataset.zoom = String(this.zoom);
     this.toolbarEl = this.rootEl.createDiv({ cls: "lumen-toolbar" });
     this.scrollEl = this.rootEl.createDiv({ cls: "lumen-scroll" });
     this.pagesEl = this.scrollEl.createDiv({ cls: "lumen-pages" });
+    if (!this.mobileRuntime) this.desktopZoom = new DesktopPdfZoom(this.scrollEl, {
+      isReady: () => this.readerReady && Boolean(this.pdfDocument) && this.rootEl.isConnected
+        && this.scrollEl.clientWidth > 0 && this.scrollEl.clientHeight > 0,
+      currentZoom: () => this.zoom,
+      begin: () => this.beginDesktopZoom(),
+      preview: (zoom, x, y) => this.previewDesktopZoom(zoom, x, y),
+      commit: (zoom, x, y) => this.commitDesktopZoom(zoom, x, y),
+      cancel: () => this.clearDesktopZoomPreview(),
+    });
     this.searchPanel = this.rootEl.createDiv({ cls: "lumen-search-panel" });
     this.outlinePanel = this.rootEl.createDiv({ cls: "lumen-outline-panel" });
     this.inspector = this.rootEl.createDiv({ cls: "lumen-inspector" });
@@ -733,7 +767,7 @@ export class LumenPdfView extends FileView {
 
     const zoomGroup = this.toolbarEl.createDiv({ cls: "lumen-control-group lumen-zoom-group" });
     zoomGroup.append(iconButton("minus", "Zoom out", () => this.zoomOut()));
-    const zoomLabel = zoomGroup.createSpan({ cls: "lumen-zoom-label", text: "125%" });
+    const zoomLabel = zoomGroup.createSpan({ cls: "lumen-zoom-label", text: `${Math.round(this.zoom * 100)}%` });
     zoomGroup.append(iconButton("plus", "Zoom in", () => this.zoomIn()));
 
     const actions = this.toolbarEl.createDiv({ cls: "lumen-toolbar-actions" });
@@ -1100,6 +1134,7 @@ export class LumenPdfView extends FileView {
     if (this.mobileRuntime && this.mobileFitMode) {
       this.zoom = this.mobileFitZoom();
       this.rootEl.style.setProperty("--lumen-zoom", String(this.zoom));
+      this.rootEl.dataset.zoom = String(this.zoom);
       this.zoomLabel.textContent = `${Math.round(this.zoom * 100)}%`;
     }
     this.pagesEl.style.setProperty("--lumen-page-width", `${this.baselineWidth}px`);
@@ -1203,7 +1238,7 @@ export class LumenPdfView extends FileView {
   }
 
   private pageNeedsCanvasWork(state: PageState): boolean {
-    if (this.mobileSuspended || this.isScrolling || performance.now() < this.pagePreviewReadyAt) return false;
+    if (this.mobileSuspended || this.desktopZoomPreview !== null || this.isScrolling || performance.now() < this.pagePreviewReadyAt) return false;
     return !state.canvasReady
       || (!this.isScrolling && performance.now() >= this.pageDetailReadyAt && !state.canvasDetailReady);
   }
@@ -1244,7 +1279,7 @@ export class LumenPdfView extends FileView {
   }
 
   private async mountPage(state: PageState, force = false): Promise<void> {
-    if (!this.pdfDocument || this.mobileSuspended || state.rendering || (!force && !state.wanted)) return;
+    if (!this.pdfDocument || this.mobileSuspended || this.desktopZoomPreview !== null || state.rendering || (!force && !state.wanted)) return;
     if (!force && !this.pageNeedsCanvasWork(state)) {
       if (!this.isScrolling) this.scheduleTextLayer(state);
       return;
@@ -1261,7 +1296,7 @@ export class LumenPdfView extends FileView {
     const generation = ++state.renderGeneration;
     try {
       const page = state.page ?? await this.pdfDocument.getPage(state.pageNumber);
-      if (this.mobileSuspended || !state.mounted || generation !== state.renderGeneration || (!force && !state.wanted)) return;
+      if (this.mobileSuspended || this.desktopZoomPreview !== null || !state.mounted || generation !== state.renderGeneration || (!force && !state.wanted)) return;
       state.page = page;
       if (!force && !this.pageNeedsCanvasWork(state)) return;
       const cssViewport = page.getViewport({ scale: this.zoom });
@@ -1331,7 +1366,7 @@ export class LumenPdfView extends FileView {
   }
 
   private scheduleTextLayer(state: PageState): void {
-    if (this.mobileSuspended || this.isScrolling || !state.wanted || !state.mounted || !state.canvasReady || state.textReady || state.textRendering || state.textTimer) return;
+    if (this.mobileSuspended || this.desktopZoomPreview !== null || this.isScrolling || !state.wanted || !state.mounted || !state.canvasReady || state.textReady || state.textRendering || state.textTimer) return;
     if (!this.isPageActuallyVisible(state)) return;
     const remainingDetailDelay = Math.max(0, this.pageDetailReadyAt - performance.now());
     state.textTimer = window.setTimeout(() => {
@@ -1347,7 +1382,7 @@ export class LumenPdfView extends FileView {
   }
 
   private async renderTextLayer(state: PageState): Promise<void> {
-    if (this.mobileSuspended || this.isScrolling || !state.wanted || !state.mounted || !state.page || !state.textHost || state.textReady || state.textRendering) return;
+    if (this.mobileSuspended || this.desktopZoomPreview !== null || this.isScrolling || !state.wanted || !state.mounted || !state.page || !state.textHost || state.textReady || state.textRendering) return;
     const generation = ++state.textGeneration;
     state.textRendering = true;
     const textHost = state.textHost;
@@ -1364,6 +1399,7 @@ export class LumenPdfView extends FileView {
       textHost.style.setProperty("--scale-factor", String(cssViewport.scale));
       textHost.empty();
       const { TextLayer } = await import("pdfjs-dist/build/pdf.mjs");
+      if (this.desktopZoomPreview !== null || this.isScrolling || !state.wanted || !state.mounted || generation !== state.textGeneration) return;
       const textLayer = new TextLayer({
         textContentSource: textContent,
         container: textHost,
@@ -1467,11 +1503,110 @@ export class LumenPdfView extends FileView {
     this.mountedPages.delete(state);
   }
 
+  private beginDesktopZoom(): void {
+    this.desktopZoomPreview = this.zoom;
+    this.rootEl.style.setProperty("--lumen-render-zoom", String(this.zoom));
+    this.rootEl.classList.add("is-zooming");
+    this.closeSelectionPalette();
+    this.closeEditor();
+    for (const state of this.mountedPages) {
+      this.cancelPendingTextLayer(state);
+      this.cancelPageRender(state);
+    }
+  }
+
+  private captureZoomAnchor(clientX: number, clientY: number): ZoomAnchor | null {
+    // Page shells stay laid out throughout the preview. A binary lookup also
+    // works over unmounted pages and avoids scanning a large document per frame.
+    let low = 1;
+    let high = this.pages.size;
+    let page = 1;
+    while (low <= high) {
+      const middle = (low + high) >>> 1;
+      const shell = this.pages.get(middle)?.shell;
+      if (!shell) return null;
+      if (shell.getBoundingClientRect().top <= clientY) {
+        page = middle;
+        low = middle + 1;
+      } else high = middle - 1;
+    }
+    const shellRect = this.pages.get(page)?.shell.getBoundingClientRect();
+    if (!shellRect?.width || !shellRect.height) return null;
+    const rootRect = this.scrollEl.getBoundingClientRect();
+    return {
+      page,
+      xRatio: (clientX - shellRect.left) / shellRect.width,
+      yRatio: (clientY - shellRect.top) / shellRect.height,
+      viewportX: clientX - rootRect.left,
+      viewportY: clientY - rootRect.top,
+    };
+  }
+
+  private restoreZoomAnchor(anchor: ZoomAnchor | null): void {
+    if (!anchor) return;
+    const shellRect = this.pages.get(anchor.page)?.shell.getBoundingClientRect();
+    if (!shellRect) return;
+    const rootRect = this.scrollEl.getBoundingClientRect();
+    this.scrollEl.scrollTo({
+      top: this.scrollEl.scrollTop + shellRect.top + anchor.yRatio * shellRect.height - rootRect.top - anchor.viewportY,
+      left: this.scrollEl.scrollLeft + shellRect.left + anchor.xRatio * shellRect.width - rootRect.left - anchor.viewportX,
+      behavior: "instant",
+    });
+  }
+
+  private previewDesktopZoom(zoom: number, clientX: number, clientY: number): void {
+    const anchor = this.captureZoomAnchor(clientX, clientY);
+    this.desktopZoomPreview = zoom;
+    this.rootEl.style.setProperty("--lumen-zoom", String(zoom));
+    this.rootEl.dataset.zoom = String(zoom);
+    this.rootEl.style.setProperty("--lumen-zoom-preview", String(zoom / this.zoom));
+    this.zoomLabel.textContent = `${Math.round(zoom * 100)}%`;
+    this.restoreZoomAnchor(anchor);
+  }
+
+  private clearDesktopZoomPreview(): void {
+    this.desktopZoomPreview = null;
+    this.rootEl?.classList.remove("is-zooming");
+    this.rootEl?.style.removeProperty("--lumen-render-zoom");
+    this.rootEl?.style.removeProperty("--lumen-zoom-preview");
+    this.rootEl?.style.setProperty("--lumen-zoom", String(this.zoom));
+    if (this.rootEl) this.rootEl.dataset.zoom = String(this.zoom);
+    if (this.zoomLabel) this.zoomLabel.textContent = `${Math.round(this.zoom * 100)}%`;
+  }
+
+  private commitDesktopZoom(zoom: number, clientX: number, clientY: number): void {
+    const changed = zoom !== this.zoom;
+    const anchor = this.captureZoomAnchor(clientX, clientY);
+    this.clearDesktopZoomPreview();
+    void this.setZoom(zoom);
+    this.restoreZoomAnchor(anchor);
+    this.updateCurrentPage();
+    if (!changed) {
+      this.rootEl.dispatchEvent(new Event("lumen-zoom-change"));
+    }
+    this.resumeDesktopZoomWork();
+  }
+
+  private resumeDesktopZoomWork(): void {
+    if (!this.readerReady || !this.pdfDocument) return;
+    for (const state of this.pages.values()) if (state.wanted) this.schedulePageMount(state);
+    this.pumpPageMounts();
+  }
+
   private async setZoom(value: number, preserveMobileFit = false): Promise<void> {
+    if (!Number.isFinite(value)) return;
+    const hadDesktopPreview = this.desktopZoomPreview !== null;
+    this.desktopZoom?.cancel();
     if (this.mobileRuntime && !preserveMobileFit) this.mobileFitMode = false;
-    const rounded = this.mobileRuntime ? Math.round(value * 20) / 20 : Math.round(value * 4) / 4;
-    this.zoom = clamp(rounded, this.minimumZoom(), 4);
+    const rounded = this.mobileRuntime ? Math.round(value * 20) / 20 : Math.round(value * 100) / 100;
+    const target = clamp(rounded, this.minimumZoom(), 4);
+    if (target === this.zoom) {
+      if (hadDesktopPreview) this.resumeDesktopZoomWork();
+      return;
+    }
+    this.zoom = target;
     this.rootEl.style.setProperty("--lumen-zoom", String(this.zoom));
+    this.rootEl.dataset.zoom = String(this.zoom);
     this.zoomLabel.textContent = `${Math.round(this.zoom * 100)}%`;
     for (const state of Array.from(this.mountedPages)) {
       this.cancelPageRender(state);
@@ -1492,6 +1627,10 @@ export class LumenPdfView extends FileView {
       if (state.wanted) this.schedulePageMount(state);
     }
     this.pumpPageMounts();
+    if (hadDesktopPreview) this.resumeDesktopZoomWork();
+    // Zoom can leave scroll offsets unchanged, including at a page boundary.
+    // Buttons, hotkeys and gestures all need to save their precise final scale.
+    this.rootEl.dispatchEvent(new Event("lumen-zoom-change"));
   }
 
   setTheme(theme: PdfTheme): void {
@@ -1849,6 +1988,7 @@ export class LumenPdfView extends FileView {
   }
 
   private captureSelection(clientX?: number, clientY?: number): void {
+    if (this.desktopZoomPreview !== null) return;
     const nativeSelection = this.mobileRuntime
       ? this.containerEl.ownerDocument.defaultView?.getSelection() ?? null
       : window.getSelection();
@@ -3388,6 +3528,8 @@ export class LumenPdfView extends FileView {
   private async teardownDocument(invalidate = true): Promise<void> {
     if (invalidate) this.documentGeneration++;
     this.readerReady = false;
+    this.desktopZoom?.dispose();
+    this.desktopZoom = null;
     this.observer?.disconnect();
     this.observer = null;
     this.pendingPageMounts.length = 0;
