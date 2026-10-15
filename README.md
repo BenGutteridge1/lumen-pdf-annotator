@@ -42,6 +42,7 @@ Lumen was built around large documents and dense annotation sets rather than opt
 - PDF outlines load after the reader is ready; named destinations and page references are cached, resolved with bounded concurrency, and yielded in batches so even unusually large outlines do not monopolize the UI thread.
 - Snapshot restore, annotation journals, and compact checkpoint serialization yield in bounded batches so six-figure loads and saves do not monopolize the UI thread. Closing or switching a PDF flushes only recent journal changes rather than rebuilding the entire snapshot.
 - Stable PDF metadata caches the content hash so unchanged large files are not re-hashed on every open. Optional recovery copies run in the background and are disabled by default to avoid cloud-vault sync pressure.
+- Optional vault-wide annotation search is disabled by default. When enabled, it writes generated Markdown copies in batches of at most 200 annotations per note, yields between batches, and coalesces rapid edits. It never reads or hashes PDF bytes to build the search copies.
 - Each open PDF receives its own bundled, version-matched PDF.js worker.
 - Mobile keeps the same single-page render queue and virtualized annotation architecture, while using a fit-to-width starting scale, a smaller near-page render window, a 6-million-pixel canvas ceiling, earlier dense-mark canvas promotion, and bounded 8-million-character search cache. Backgrounding the app cancels unfinished page work, flushes recent annotation journal entries, and resumes visible-page detail after return.
 
@@ -121,6 +122,7 @@ Previous page, next page, page-note placement, annotation checkpoint, export, le
 ### Backup, export, and migration commands
 
 - **Export annotations for this PDF** writes a readable Markdown file under `.lumen-pdf/exports/`. In **Settings → Lumen PDF Annotator → Export annotations**, choose individual annotated PDFs or select all filtered matches and export them together. Each PDF gets a separate, uniquely named Markdown note with the source PDF path, page headings, quoted highlight text, attached notes, tags, and links back to the exact annotation. Multi-page highlights stay grouped with their one associated note. Exports do not include raw recovery JSON and do not change the source PDFs.
+- **Include PDF annotations in vault search** is off by default. Turn it on in Lumen's settings to create searchable Markdown copies under `Lumen PDF annotation index/`. Obsidian Search finds their quoted text and notes; Omnisearch also indexes them when installed. Search results open a generated note with a nearby link to the exact annotation in Lumen. Existing saved annotations are indexed in the background without opening their PDFs, and later edits update the copies after a short pause. Turning the setting off removes only Lumen's generated search copies and their folder when empty. Edit annotations in their PDFs because the generated notes are replaced during synchronization.
 - **Save an annotation checkpoint** immediately compacts the journal into a snapshot.
 - **Verify all PDF backup checksums** checks every local backup against its SHA-256 identity.
 - **Restore a backed-up PDF** verifies the checksum before creating a non-destructive copy under `.lumen-pdf/recovered/`.
@@ -128,7 +130,7 @@ Previous page, next page, page-note placement, annotation checkpoint, export, le
 
 ## Settings
 
-**Make Lumen the default PDF viewer** is enabled initially. Disable it if you want to keep Obsidian's built-in PDF view and open selected PDFs through Lumen's command instead. Restart Obsidian after changing this setting. **PDF theme** sets the persistent light, sepia, or dark reading theme. **Create automatic PDF recovery copies** is disabled by default; enable it only if you want a background bundle copy in addition to your source PDF.
+**Make Lumen the default PDF viewer** is enabled initially. Disable it if you want to keep Obsidian's built-in PDF view and open selected PDFs through Lumen's command instead. Restart Obsidian after changing this setting. **PDF theme** sets the persistent light, sepia, or dark reading theme. **Create automatic PDF recovery copies** is disabled by default; enable it only if you want a background bundle copy in addition to your source PDF. **Include PDF annotations in vault search** is also disabled by default, so existing vaults have no new search files or indexing work until you opt in.
 
 ## Contributing
 

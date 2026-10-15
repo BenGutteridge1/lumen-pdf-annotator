@@ -1,6 +1,8 @@
 import { FuzzySuggestModal, Modal, normalizePath, Notice, ObsidianProtocolData, Platform, Plugin, PluginSettingTab, TFile } from "obsidian";
 import type { SettingDefinitionItem } from "obsidian";
 import { LUMEN_PROTOCOL_ACTION } from "./links";
+import { AnnotationSearchIndex } from "./annotation-search-index";
+import type { AnnotationSearchSource } from "./annotation-search-index";
 import { disposePdfRuntime } from "./pdf-runtime";
 import { AnnotationBundleInfo, BundleInfo, exportAnnotationBundle, listAnnotationBundles, listBundles, restoreBundle, verifyBundle } from "./storage";
 import { LumenPdfView, LUMEN_VIEW_TYPE, PdfTheme } from "./view";
@@ -11,6 +13,7 @@ interface LumenSettings {
   pdfTheme: PdfTheme;
   legacyAnnotationFolder: string;
   automaticPdfBackups: boolean;
+  indexAnnotations: boolean;
 }
 
 const DEFAULT_SETTINGS: LumenSettings = {
@@ -18,6 +21,7 @@ const DEFAULT_SETTINGS: LumenSettings = {
   pdfTheme: "light",
   legacyAnnotationFolder: "PDF annotations",
   automaticPdfBackups: false,
+  indexAnnotations: false,
 };
 
 function isPdfTheme(value: unknown): value is PdfTheme {
@@ -32,6 +36,7 @@ function readSettings(value: unknown): LumenSettings {
     pdfTheme: isPdfTheme(stored.pdfTheme) ? stored.pdfTheme : DEFAULT_SETTINGS.pdfTheme,
     legacyAnnotationFolder: typeof stored.legacyAnnotationFolder === "string" ? stored.legacyAnnotationFolder : DEFAULT_SETTINGS.legacyAnnotationFolder,
     automaticPdfBackups: typeof stored.automaticPdfBackups === "boolean" ? stored.automaticPdfBackups : DEFAULT_SETTINGS.automaticPdfBackups,
+    indexAnnotations: typeof stored.indexAnnotations === "boolean" ? stored.indexAnnotations : DEFAULT_SETTINGS.indexAnnotations,
   };
 }
 
@@ -43,11 +48,21 @@ export default class LumenPdfPlugin extends Plugin {
   settings: LumenSettings = DEFAULT_SETTINGS;
   private dataWrite: Promise<void> = Promise.resolve();
   private viewState!: PdfViewStateManager;
+  private annotationSearch!: AnnotationSearchIndex;
 
   async onload(): Promise<void> {
     this.settings = readSettings(await this.loadData() as unknown);
     this.viewState = new PdfViewStateManager(this, state => this.saveMergedData({ pdfViewState: state }));
     await this.viewState.load();
+    this.annotationSearch = new AnnotationSearchIndex(this.app, () => {
+      const sources: AnnotationSearchSource[] = [];
+      for (const leaf of this.app.workspace.getLeavesOfType(LUMEN_VIEW_TYPE)) {
+        if (!(leaf.view instanceof LumenPdfView)) continue;
+        const source = leaf.view.getAnnotationSearchSource();
+        if (source) sources.push(source);
+      }
+      return sources;
+    }, this.settings.indexAnnotations, () => new Notice("Lumen could not update some annotation search copies. See the developer console.", 8_000));
     this.registerView(LUMEN_VIEW_TYPE, leaf => new LumenPdfView(
       leaf,
       this.settings.pdfTheme,
@@ -58,6 +73,7 @@ export default class LumenPdfPlugin extends Plugin {
       this.settings.legacyAnnotationFolder,
       this.settings.automaticPdfBackups,
       () => this.viewState.attach(leaf),
+      source => this.annotationSearch.schedule(source),
     ));
     if (this.settings.defaultViewer) this.installAsDefaultPdfViewer();
     this.registerObsidianProtocolHandler(LUMEN_PROTOCOL_ACTION, params => void this.openAnnotationLink(params).catch(error => {
@@ -101,9 +117,11 @@ export default class LumenPdfPlugin extends Plugin {
       if (leaf) this.viewState.attach(leaf);
     }));
     window.setTimeout(() => this.viewState.attachAll(), 0);
+    this.annotationSearch.start();
   }
 
   onunload(): void {
+    this.annotationSearch?.dispose();
     void this.viewState?.flush().catch(error => console.error("Lumen could not flush PDF view state", error));
     disposePdfRuntime();
   }
@@ -183,6 +201,12 @@ export default class LumenPdfPlugin extends Plugin {
       if (leaf.view instanceof LumenPdfView) leaf.view.setTheme(theme);
     }
     await this.saveSettings();
+  }
+
+  async setAnnotationSearchEnabled(enabled: boolean): Promise<void> {
+    this.settings.indexAnnotations = enabled;
+    await this.saveSettings();
+    await this.annotationSearch.setEnabled(enabled);
   }
 
   saveSettings(): Promise<void> {
@@ -281,6 +305,18 @@ class LumenSettingTab extends PluginSettingTab {
         name: "Create automatic PDF recovery copies",
         desc: "Copy each opened PDF into Lumen's recovery storage in the background. Keep this off for the smoothest large-PDF and cloud-vault performance.",
         control: { type: "toggle", key: "automaticPdfBackups", defaultValue: DEFAULT_SETTINGS.automaticPdfBackups },
+      },
+      {
+        name: "Include PDF annotations in vault search",
+        desc: "Create searchable Markdown copies of highlights and notes in Lumen PDF annotation index for Obsidian Search and Omnisearch. Enabling scans saved annotations in the background; disabling removes generated copies. Edit annotations in the PDF.",
+        render: setting => {
+          setting.addToggle(toggle => toggle
+            .setValue(this.plugin.settings.indexAnnotations)
+            .onChange(value => void this.plugin.setAnnotationSearchEnabled(value).catch(error => {
+              console.error("Lumen could not change annotation search indexing", error);
+              new Notice("Lumen could not change annotation search indexing. See the developer console.", 8_000);
+            })));
+        },
       },
       {
         name: "Export annotations",

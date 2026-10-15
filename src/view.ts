@@ -18,6 +18,7 @@ import {
   resolvePdfOutline,
 } from "./outline";
 import { DocumentBundle, LegacyAnnotationRecord, loadLegacyAnnotations, openBundle } from "./storage";
+import type { AnnotationSearchSource } from "./annotation-search-index";
 
 export const LUMEN_VIEW_TYPE = "lumen-pdf-view";
 export type PdfTheme = "light" | "sepia" | "dark";
@@ -351,6 +352,7 @@ export class LumenPdfView extends FileView {
     private readonly legacyAnnotationFolder = "PDF annotations",
     private readonly automaticPdfBackups = false,
     private readonly onReaderReady?: () => void,
+    private readonly onAnnotationsChanged?: (source: AnnotationSearchSource) => void,
   ) {
     super(leaf);
     this.theme = initialTheme;
@@ -395,6 +397,23 @@ export class LumenPdfView extends FileView {
   getIcon(): string { return "file-text"; }
   canAcceptExtension(extension: string): boolean { return extension.toLowerCase() === "pdf"; }
 
+  getAnnotationSearchSource(): AnnotationSearchSource | null {
+    const bundle = this.bundle;
+    if (!bundle || !this.file) return null;
+    return {
+      hash: bundle.hash,
+      folder: bundle.folder,
+      pdfPath: this.file.path,
+      index: this.index,
+      flush: () => bundle.repository.flushJournal(),
+    };
+  }
+
+  private reportAnnotationChange(): void {
+    const source = this.getAnnotationSearchSource();
+    if (source) this.onAnnotationsChanged?.(source);
+  }
+
   async onOpen(): Promise<void> {
     this.contentEl.empty();
     this.contentEl.addClass("lumen-host");
@@ -438,7 +457,7 @@ export class LumenPdfView extends FileView {
     if (generation !== this.documentGeneration) return;
     const bytes = await this.app.vault.readBinary(file);
     if (generation !== this.documentGeneration) return;
-    const bundle = await openBundle(this.app.vault, file, bytes, this.automaticPdfBackups);
+    const bundle = await openBundle(this.app.vault, file, bytes, this.automaticPdfBackups, () => this.reportAnnotationChange());
     if (generation !== this.documentGeneration) return;
     const indexPromise = bundle.repository.load();
     const loaded = await loadPdf(bytes, this.mobileRuntime);
@@ -461,6 +480,7 @@ export class LumenPdfView extends FileView {
     if (generation !== this.documentGeneration) return;
     this.bundle = bundle;
     this.index = index;
+    this.reportAnnotationChange();
     for (const state of this.mountedPages) this.renderMarks(state.pageNumber);
     this.refreshInspector();
     window.setTimeout(() => {

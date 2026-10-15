@@ -262,6 +262,7 @@ export class AnnotationRepository {
     folder: string,
     private readonly hash: string,
     private readonly pdfPath: string,
+    private readonly onMutation?: () => void,
   ) {
     this.snapshotPath = `${folder}/annotations.md`;
     this.previousPath = `${folder}/annotations.previous.md`;
@@ -337,6 +338,8 @@ export class AnnotationRepository {
     this.flushTimer = window.setTimeout(() => {
       void this.flushJournal().catch(error => console.error("Lumen could not flush its annotation journal", error));
     }, 220);
+    try { this.onMutation?.(); }
+    catch (error) { console.warn("Lumen could not schedule annotation search indexing", error); }
   }
 
   async flushJournal(): Promise<void> {
@@ -411,6 +414,7 @@ export async function openBundle(
   file: TFile,
   bytes: ArrayBuffer,
   automaticPdfBackup = false,
+  onMutation?: () => void,
 ): Promise<DocumentBundle> {
   const hash = await documentHash(vault, file, bytes);
   const folder = normalizePath(`${ROOT}/${hash}`);
@@ -435,7 +439,7 @@ export async function openBundle(
     } catch { /* replace malformed manifests */ }
   }
   if (shouldWriteManifest) await vault.adapter.write(manifestPath, JSON.stringify(manifest, null, 2));
-  const repository = new AnnotationRepository(vault, folder, hash, file.path);
+  const repository = new AnnotationRepository(vault, folder, hash, file.path, onMutation);
   return { hash, folder, repository };
 }
 
