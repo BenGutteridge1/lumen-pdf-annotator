@@ -2,6 +2,10 @@
 
 All notable changes to Lumen PDF Annotator are documented here.
 
+## 1.0.24 — 2026-10-15
+
+- Let table-of-contents rows grow with wrapped chapter titles, so the title, selection background, and following entry no longer overlap. Single-line rows keep their existing minimum height on desktop and mobile.
+
 ## 1.0.23 — 2026-10-15
 
 - Add an off-by-default setting for vault-wide search of Lumen annotations (issue #19). When enabled, Lumen creates and maintains searchable Markdown copies of highlights and notes for Obsidian Search and Omnisearch, with links to the exact PDF annotations.

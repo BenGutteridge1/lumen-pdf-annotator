@@ -433,13 +433,15 @@
   overflow: auto;
   padding: 5px 8px 10px;
 }
-.lumen-outline-item {
+.lumen-reader .lumen-outline-item {
   position: relative;
   display: grid;
   grid-template-columns: minmax(0, 1fr) max-content;
   align-items: start;
   gap: 10px;
   width: 100%;
+  /* Obsidian fixes button height to its input height; outline rows must grow with wrapped titles. */
+  height: auto;
   min-height: 34px;
   margin: 0 0 2px;
   padding: 6px 10px 6px calc(10px + var(--lumen-outline-indent, 0px));
