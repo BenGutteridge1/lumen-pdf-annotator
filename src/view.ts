@@ -18,6 +18,7 @@ import {
   resolvePdfOutline,
 } from "./outline";
 import { DocumentBundle, LegacyAnnotationRecord, loadLegacyAnnotations, openBundle } from "./storage";
+import type { AnnotationSearchSource } from "./annotation-search-index";
 
 export const LUMEN_VIEW_TYPE = "lumen-pdf-view";
 export type PdfTheme = "light" | "sepia" | "dark";
@@ -351,6 +352,7 @@ export class LumenPdfView extends FileView {
     private readonly legacyAnnotationFolder = "PDF annotations",
     private readonly automaticPdfBackups = false,
     private readonly onReaderReady?: () => void,
+    private readonly onAnnotationsChanged?: (source: AnnotationSearchSource) => void,
   ) {
     super(leaf);
     this.theme = initialTheme;
@@ -395,6 +397,23 @@ export class LumenPdfView extends FileView {
   getIcon(): string { return "file-text"; }
   canAcceptExtension(extension: string): boolean { return extension.toLowerCase() === "pdf"; }
 
+  getAnnotationSearchSource(): AnnotationSearchSource | null {
+    const bundle = this.bundle;
+    if (!bundle || !this.file) return null;
+    return {
+      hash: bundle.hash,
+      folder: bundle.folder,
+      pdfPath: this.file.path,
+      index: this.index,
+      flush: () => bundle.repository.flushJournal(),
+    };
+  }
+
+  private reportAnnotationChange(): void {
+    const source = this.getAnnotationSearchSource();
+    if (source) this.onAnnotationsChanged?.(source);
+  }
+
   async onOpen(): Promise<void> {
     this.contentEl.empty();
     this.contentEl.addClass("lumen-host");
@@ -438,7 +457,7 @@ export class LumenPdfView extends FileView {
     if (generation !== this.documentGeneration) return;
     const bytes = await this.app.vault.readBinary(file);
     if (generation !== this.documentGeneration) return;
-    const bundle = await openBundle(this.app.vault, file, bytes, this.automaticPdfBackups);
+    const bundle = await openBundle(this.app.vault, file, bytes, this.automaticPdfBackups, () => this.reportAnnotationChange());
     if (generation !== this.documentGeneration) return;
     const indexPromise = bundle.repository.load();
     const loaded = await loadPdf(bytes, this.mobileRuntime);
@@ -461,6 +480,7 @@ export class LumenPdfView extends FileView {
     if (generation !== this.documentGeneration) return;
     this.bundle = bundle;
     this.index = index;
+    this.reportAnnotationChange();
     for (const state of this.mountedPages) this.renderMarks(state.pageNumber);
     this.refreshInspector();
     window.setTimeout(() => {
@@ -2847,7 +2867,33 @@ export class LumenPdfView extends FileView {
     return Math.min(itemCount * CARD_HEIGHT, MAX_INSPECTOR_SCROLL_HEIGHT);
   }
 
+  private appendInspectorSearchText(container: HTMLElement, value: string, query: string, context?: number): void {
+    const lowerValue = query ? value.toLowerCase() : "";
+    const matchAt = query ? lowerValue.indexOf(query) : -1;
+    if (matchAt < 0) {
+      container.textContent = value;
+      return;
+    }
+    // Cards clamp long quotes and notes. Put the first match near the start so
+    // it stays visible, and bound the number of mark nodes for large quotes.
+    const start = context === undefined ? 0 : Math.max(0, matchAt - context);
+    const end = context === undefined ? value.length
+      : Math.min(value.length, Math.max(start + 160, matchAt + query.length + 48));
+    const doc = container.ownerDocument;
+    if (start) container.append(doc.createTextNode("…"));
+    let cursor = start;
+    for (let found = lowerValue.indexOf(query, cursor); found >= 0 && found + query.length <= end;
+      found = lowerValue.indexOf(query, cursor)) {
+      if (found > cursor) container.append(doc.createTextNode(value.slice(cursor, found)));
+      container.createEl("mark", { text: value.slice(found, found + query.length) });
+      cursor = found + query.length;
+    }
+    if (cursor < end) container.append(doc.createTextNode(value.slice(cursor, end)));
+    if (end < value.length) container.append(doc.createTextNode("…"));
+  }
+
   private renderInspectorWindow(viewportOverride?: number, scrollTopOverride?: number): void {
+    const query = this.inspectorQuery?.value.trim().toLowerCase() ?? "";
     const directWindow = this.usesDirectInspectorWindow();
     const filteredItems = directWindow ? null : this.filteredAnnotations();
     const itemCount = directWindow ? this.index.logicalSize : filteredItems?.length ?? 0;
@@ -2903,16 +2949,30 @@ export class LumenPdfView extends FileView {
       card.style.top = `${offset * CARD_HEIGHT + 4}px`;
       card.style.setProperty("--mark-color", item.color);
       const meta = card.createDiv({ cls: "lumen-card-meta" });
-      meta.createEl("strong", { text: this.annotationPageLabel(item, "p.") });
+      const pageLabel = this.annotationPageLabel(item, "p.");
+      this.appendInspectorSearchText(meta.createEl("strong"), pageLabel, query);
       meta.createSpan({ text: item.kind === "page-note" ? "page note" : item.note ? "note" : markLabel(item.style) });
+      if (query) {
+        const tags = item.tags.join(" ");
+        if (tags.toLowerCase().includes(query)
+          && ![pageLabel, item.quote, item.note].some(value => value.toLowerCase().includes(query))) {
+          const tagLabel = meta.createSpan({ cls: "lumen-card-search-tags" });
+          tagLabel.append(tagLabel.ownerDocument.createTextNode("tag: "));
+          this.appendInspectorSearchText(tagLabel.createSpan(), tags, query, 0);
+        }
+      }
       if (this.mobileRuntime) {
         const edit = iconButton("pencil", "Edit annotation", () => this.openInspectorDetail(item.id));
         edit.addClass("lumen-card-edit");
         edit.addEventListener("keydown", event => event.stopPropagation());
         meta.append(edit);
       }
-      if (item.kind !== "page-note") card.createDiv({ cls: "lumen-card-quote", text: item.quote });
-      if (item.note || item.kind === "page-note") card.createDiv({ cls: "lumen-card-note", text: item.note || "Page note" });
+      if (item.kind !== "page-note") {
+        this.appendInspectorSearchText(card.createDiv({ cls: "lumen-card-quote" }), item.quote, query, 24);
+      }
+      if (item.note || item.kind === "page-note") {
+        this.appendInspectorSearchText(card.createDiv({ cls: "lumen-card-note" }), item.note || "Page note", query, 24);
+      }
       const activate = () => {
         this.goToPage(item.page, "smooth", this.mobileRuntime ? item.rects[0]?.y : undefined);
         this.flashAnnotation(item.id);

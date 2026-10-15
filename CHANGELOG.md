@@ -2,6 +2,12 @@
 
 All notable changes to Lumen PDF Annotator are documented here.
 
+## 1.0.23 — 2026-10-15
+
+- Add an off-by-default setting for vault-wide search of Lumen annotations (issue #19). When enabled, Lumen creates and maintains searchable Markdown copies of highlights and notes for Obsidian Search and Omnisearch, with links to the exact PDF annotations.
+- Build existing search copies in the background without reading source PDFs, update after a short edit pause, and remove only generated copies when disabled. Annotation records, source PDFs, manual exports, and their storage format remain unchanged.
+- Highlight matching words in annotation-panel search cards, including long quotes and notes where the match would otherwise be clipped. Page-number and tag-only matches are also visible in results.
+
 ## 1.0.22 — 2026-10-09
 
 - Add desktop trackpad pinch and Ctrl+wheel PDF zoom around the pointer, with 1% scale precision, saved zoom, and the existing 25% button stops (issue #15). Ordinary scrolling and mobile touch behavior remain unchanged.
