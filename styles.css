@@ -539,12 +539,19 @@
   text-align: left;
   color: var(--lumen-text);
 }
-.lumen-search-excerpt mark {
+.lumen-search-excerpt mark,
+.lumen-annotation-card mark {
   padding: 0 1px;
   border-radius: 2px;
   background: color-mix(in srgb, var(--interactive-accent) 24%, transparent);
   color: inherit;
   font-weight: 650;
+}
+.lumen-card-search-tags {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .lumen-filter-row {
   display: flex;
@@ -1153,7 +1160,8 @@
   background-color: var(--background-modifier-hover);
   color: var(--lumen-text);
 }
-.lumen-search-excerpt mark {
+.lumen-search-excerpt mark,
+.lumen-annotation-card mark {
   background: color-mix(in srgb, var(--lumen-search-color) 34%, transparent);
 }
 .lumen-reader .lumen-color-chip:hover,
