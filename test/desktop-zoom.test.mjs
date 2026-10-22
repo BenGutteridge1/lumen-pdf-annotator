@@ -302,6 +302,28 @@ function renderer({ mobile = false, count = 10, ViewClass } = {}) {
   return { view, scheduler, scrollEl, rootEl, reads: () => reads };
 }
 
+test('zoom controls preserve the current page and position within it on desktop and mobile', () => {
+  for (const mobile of [false, true]) {
+    const { view, scrollEl } = renderer({ mobile, count: 20 });
+    const page = 7;
+    const viewportOffset = 84; // The 12% current-page anchor in a 700px viewport.
+    scrollEl.scrollTop = view.pages.get(page).shell.offsetTop + 800 * view.currentZoom() * .35 - viewportOffset;
+    view.updateCurrentPage();
+    const original = view.captureReadingZoomAnchor();
+    assert.equal(view.currentPage, page);
+
+    for (const change of ['zoomIn', 'zoomOut', 'resetZoom']) {
+      view[change]();
+      const current = view.captureReadingZoomAnchor();
+      assert.equal(view.currentPage, page, `${change} changed the ${mobile ? 'mobile' : 'desktop'} page`);
+      assert.equal(view.pageInput.value, String(page));
+      assert.equal(current.page, original.page);
+      assert.ok(Math.abs(current.yRatio - original.yRatio) < 1e-10,
+        `${change} moved the ${mobile ? 'mobile' : 'desktop'} reading position`);
+    }
+  }
+});
+
 test('actual desktop renderer anchors both axes across centered/overflow layouts without scanning 3000 pages', () => {
   const { view, scheduler, scrollEl, rootEl, reads } = renderer({ count: 3000 });
   scrollEl.scrollTop = 4300;

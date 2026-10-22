@@ -2,6 +2,10 @@
 
 All notable changes to Lumen PDF Annotator are documented here.
 
+## 1.0.25 — 2026-10-22
+
+- Keep the same PDF page and reading position when changing zoom with toolbar buttons, commands, or reset on desktop and mobile (issue #22). Desktop touchpad pinch continues to zoom around the pointer.
+
 ## 1.0.24 — 2026-10-15
 
 - Let table-of-contents rows grow with wrapped chapter titles, so the title, selection background, and following entry no longer overlap. Single-line rows keep their existing minimum height on desktop and mobile.
