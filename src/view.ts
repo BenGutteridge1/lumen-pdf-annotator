@@ -1562,6 +1562,19 @@ export class LumenPdfView extends FileView {
     };
   }
 
+  private captureReadingZoomAnchor(): ZoomAnchor | null {
+    if (!this.readerReady || !this.pdfDocument || !this.pages.size) return null;
+    const rect = this.scrollEl.getBoundingClientRect();
+    const viewportOffset = clamp(
+      this.scrollEl.clientHeight * CURRENT_PAGE_VIEWPORT_FRACTION,
+      CURRENT_PAGE_MIN_OFFSET,
+      CURRENT_PAGE_MAX_OFFSET,
+    );
+    // Match the point used by updateCurrentPage so button and shortcut zoom
+    // retain both the visible page and the reader's position within it.
+    return this.captureZoomAnchor(rect.left + this.scrollEl.clientWidth / 2, rect.top + viewportOffset);
+  }
+
   private restoreZoomAnchor(anchor: ZoomAnchor | null): void {
     if (!anchor) return;
     const shellRect = this.pages.get(anchor.page)?.shell.getBoundingClientRect();
@@ -1598,7 +1611,7 @@ export class LumenPdfView extends FileView {
     const changed = zoom !== this.zoom;
     const anchor = this.captureZoomAnchor(clientX, clientY);
     this.clearDesktopZoomPreview();
-    void this.setZoom(zoom);
+    void this.setZoom(zoom, false, false);
     this.restoreZoomAnchor(anchor);
     this.updateCurrentPage();
     if (!changed) {
@@ -1613,14 +1626,17 @@ export class LumenPdfView extends FileView {
     this.pumpPageMounts();
   }
 
-  private async setZoom(value: number, preserveMobileFit = false): Promise<void> {
+  private async setZoom(value: number, preserveMobileFit = false, preserveViewport = true): Promise<void> {
     if (!Number.isFinite(value)) return;
+    const anchor = preserveViewport ? this.captureReadingZoomAnchor() : null;
     const hadDesktopPreview = this.desktopZoomPreview !== null;
     this.desktopZoom?.cancel();
     if (this.mobileRuntime && !preserveMobileFit) this.mobileFitMode = false;
     const rounded = this.mobileRuntime ? Math.round(value * 20) / 20 : Math.round(value * 100) / 100;
     const target = clamp(rounded, this.minimumZoom(), 4);
     if (target === this.zoom) {
+      this.restoreZoomAnchor(anchor);
+      if (anchor) this.updateCurrentPage();
       if (hadDesktopPreview) this.resumeDesktopZoomWork();
       return;
     }
@@ -1628,6 +1644,8 @@ export class LumenPdfView extends FileView {
     this.rootEl.style.setProperty("--lumen-zoom", String(this.zoom));
     this.rootEl.dataset.zoom = String(this.zoom);
     this.zoomLabel.textContent = `${Math.round(this.zoom * 100)}%`;
+    this.restoreZoomAnchor(anchor);
+    if (anchor) this.updateCurrentPage();
     for (const state of Array.from(this.mountedPages)) {
       this.cancelPageRender(state);
       this.cancelPendingTextLayer(state);
