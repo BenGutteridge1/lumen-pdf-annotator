@@ -2,6 +2,10 @@
 
 All notable changes to Lumen PDF Annotator are documented here.
 
+## 1.0.26 — 2026-10-23
+
+- Remove the stray vertical selection strip at the PDF page margin by keeping PDF.js line-break elements transparent during text selection. Selected text and saved annotation geometry remain unchanged on desktop and mobile.
+
 ## 1.0.25 — 2026-10-22
 
 - Keep the same PDF page and reading position when changing zoom with toolbar buttons, commands, or reset on desktop and mobile (issue #22). Desktop touchpad pinch continues to zoom around the pointer.
