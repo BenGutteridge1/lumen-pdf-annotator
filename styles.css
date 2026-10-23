@@ -165,6 +165,14 @@
 .lumen-text-layer ::selection {
   background: color-mix(in srgb, var(--interactive-accent) 35%, transparent);
 }
+/* PDF.js inserts positioned line breaks between text runs. Their selection
+ * paint can appear as a vertical strip at the page edge; keep only text tinted. */
+.lumen-text-layer br::selection {
+  background: transparent;
+}
+.lumen-text-layer br::-moz-selection {
+  background: transparent;
+}
 .lumen-mark-layer {
   pointer-events: none;
 }
