@@ -2,16 +2,14 @@ import { Plugin, WorkspaceLeaf } from "obsidian";
 import { LumenPdfView, LUMEN_VIEW_TYPE } from "./view";
 import { newerPosition, readingPosition, ReadingPosition, ReadingPositionStore } from "./reading-position";
 
-interface PdfViewState {
-  page: number;
+interface PdfZoomState {
   zoom: number;
-  updatedAt: number;
   mobileFit?: boolean;
 }
 
 interface PdfViewStateData {
-  version: 1;
-  pdfs: Record<string, PdfViewState>;
+  version: 2;
+  pdfs: Record<string, PdfZoomState>;
 }
 
 interface PluginDataWithViewState {
@@ -22,8 +20,8 @@ interface PluginDataWithViewState {
 const SAVE_DELAY_MS = 450;
 const MAX_ENTRIES = 2000;
 
-function stateKey(view: LumenPdfView, path: string): string {
-  // Scale is device-specific; the reading page is shared separately.
+function zoomKey(view: LumenPdfView, path: string): string {
+  // Preserve independent device zoom preferences in local plugin settings.
   return view.isMobileView() ? `mobile:${path}` : path;
 }
 
@@ -32,7 +30,7 @@ function stateKey(view: LumenPdfView, path: string): string {
  * PDF renderer or annotation journal, so normal reading remains unaffected.
  */
 export class PdfViewStateManager {
-  private data: PdfViewStateData = { version: 1, pdfs: {} };
+  private data: PdfViewStateData = { version: 2, pdfs: {} };
   private saveTimer: number | null = null;
   private saveChain: Promise<void> = Promise.resolve();
   private readonly attached = new WeakSet<HTMLElement>();
@@ -44,6 +42,7 @@ export class PdfViewStateManager {
   private readonly documentHashes = new WeakMap<HTMLElement, string>();
   private readonly positions = new Map<string, ReadingPosition>();
   private readonly pendingPositions = new Map<string, ReadingPosition>();
+  private readonly legacyPositions = new Map<string, ReadingPosition>();
   private readonly positionStore: ReadingPositionStore | null;
 
   constructor(
@@ -60,10 +59,18 @@ export class PdfViewStateManager {
       : null;
     const stored = data?.pdfViewState;
     const pdfs = stored?.pdfs && typeof stored.pdfs === "object" ? stored.pdfs : {};
-    this.data = { version: 1, pdfs: Object.fromEntries(Object.entries(pdfs).flatMap(([key, state]) => {
+    const zooms: Record<string, PdfZoomState> = {};
+    for (const [key, raw] of Object.entries(pdfs)) {
+      if (!raw || typeof raw !== "object") continue;
+      const state = raw as Partial<PdfZoomState & ReadingPosition>;
+      if (Number.isFinite(state.zoom)) zooms[key] = { zoom: state.zoom!, mobileFit: state.mobileFit === true || undefined };
       const position = readingPosition(state);
-      return position ? [[key, { ...position, zoom: Number.isFinite(state.zoom) ? state.zoom : 1.25, mobileFit: state.mobileFit === true }]] : [];
-    })) };
+      if (position) {
+        const path = key.startsWith("mobile:") ? key.slice("mobile:".length) : key;
+        this.legacyPositions.set(path, newerPosition(this.legacyPositions.get(path) ?? null, position)!);
+      }
+    }
+    this.data = { version: 2, pdfs: zooms };
   }
 
   attach(leaf: WorkspaceLeaf): void {
@@ -85,7 +92,8 @@ export class PdfViewStateManager {
     const zoomButtons = root.querySelectorAll(".lumen-zoom-group .lumen-icon-button");
     const pageInput = root.querySelector(".lumen-page-input");
 
-    let saved = this.data.pdfs[stateKey(view, path)];
+    const savedZoom = this.data.pdfs[zoomKey(view, path)];
+    let savedPosition: ReadingPosition | null = null;
     const hash = view.getDocumentHash();
     if (hash) this.documentHashes.set(root, hash);
     let positionLoaded = false;
@@ -113,7 +121,7 @@ export class PdfViewStateManager {
       resizeObserver = null;
       this.pendingRestores.delete(root);
       this.lastPages.set(root, Number.parseInt(root.querySelector<HTMLInputElement>(".lumen-page-input")?.value ?? "1", 10));
-      this.pageTimes.set(root, saved?.updatedAt ?? 0);
+      this.pageTimes.set(root, savedPosition?.updatedAt ?? 0);
       scroll.addEventListener("scroll", captureLater, { passive: true });
       pageInput?.addEventListener("change", captureLater);
       zoomButtons.forEach(button => button.addEventListener("click", captureLater));
@@ -130,7 +138,7 @@ export class PdfViewStateManager {
           if (!position || position.updatedAt <= pageTime || disposed || timer || !view.canRestoreReadingPosition()
             || this.pageTimes.get(root) !== pageTime || view.file?.path !== path
             || Number.parseInt(root.querySelector<HTMLInputElement>(".lumen-page-input")?.value ?? "1", 10) !== currentPage) return;
-          const restored = await this.restore(view, root, { ...position, zoom: view.currentZoom(), mobileFit: view.usesMobileFit() });
+          const restored = await this.restore(view, root, { zoom: view.currentZoom(), mobileFit: view.usesMobileFit() }, position);
           if (restored) {
             this.positions.set(hash, position);
             this.lastPages.set(root, position.page);
@@ -171,24 +179,35 @@ export class PdfViewStateManager {
       restoring = true;
       void (async () => {
         if (!positionLoaded) {
-          // Migrate the newest old desktop/mobile page, without borrowing its
-          // zoom. Read on every open so GitSync updates are seen without reload.
-          let position = newerPosition(readingPosition(this.data.pdfs[path]), readingPosition(this.data.pdfs[`mobile:${path}`]));
+          // Migrate old plugin settings and 1.0.27 sidecars, without borrowing
+          // their zoom. New state lives beside each PDF's annotation bundle.
+          const legacyPosition = this.legacyPositions.get(path) ?? null;
+          let storedPosition: ReadingPosition | null = null;
+          let sidecarPosition: ReadingPosition | null = null;
           if (hash && this.positionStore) {
-            try { position = newerPosition(await this.positionStore.read(hash), position); }
+            try {
+              storedPosition = await this.positionStore.read(hash);
+              if (!storedPosition) sidecarPosition = await this.positionStore.readLegacy(hash);
+            }
             catch (error) { console.warn("Lumen could not read the shared PDF page", error); }
+            const position = newerPosition(storedPosition, newerPosition(sidecarPosition, legacyPosition));
             if (position) {
               this.positions.set(hash, position);
-              this.pendingPositions.set(hash, position);
-              this.scheduleSave();
+              if (!storedPosition || position.updatedAt > storedPosition.updatedAt) {
+                this.pendingPositions.set(hash, position);
+                this.scheduleSave();
+              }
             }
+            savedPosition = newerPosition(storedPosition, newerPosition(sidecarPosition, legacyPosition));
+          } else {
+            savedPosition = legacyPosition;
           }
-          if (position) saved = { ...saved, ...position, zoom: saved?.zoom ?? view.currentZoom(), mobileFit: saved?.mobileFit ?? view.usesMobileFit() };
           positionLoaded = true;
         }
-        if (!saved) return true;
+        if (!savedPosition && !savedZoom) return true;
         if (disposed || view.file?.path !== path) return false;
-        return this.restore(view, root, saved);
+        if (savedPosition) this.pageTimes.set(root, savedPosition.updatedAt);
+        return this.restore(view, root, savedZoom ?? { zoom: view.currentZoom(), mobileFit: view.usesMobileFit() }, savedPosition);
       })().then(restored => {
         restoring = false;
         if (!disposed && restored && view.file?.path === path) startListening();
@@ -207,11 +226,10 @@ export class PdfViewStateManager {
     for (const leaf of this.plugin.app.workspace.getLeavesOfType(LUMEN_VIEW_TYPE)) this.attach(leaf);
   }
 
-  private async restore(view: LumenPdfView, root: HTMLElement, state: PdfViewState): Promise<boolean> {
+  private async restore(view: LumenPdfView, root: HTMLElement, state: PdfZoomState, position: ReadingPosition | null): Promise<boolean> {
     const savedZoom = Number.isFinite(state.zoom) ? state.zoom : 1.25;
     const roundedZoom = view.isMobileView() ? Math.round(savedZoom * 20) / 20 : Math.round(savedZoom * 100) / 100;
     const desiredZoom = Math.max(view.minimumZoom(), Math.min(4, roundedZoom));
-    const page = Math.max(1, Math.round(Number.isFinite(state.page) ? state.page : 1));
     const currentZoom = view.currentZoom();
     if (view.isMobileView() || Math.abs(desiredZoom - currentZoom) >= 0.001) {
       await view.restoreZoom(desiredZoom, Boolean(state.mobileFit));
@@ -219,7 +237,7 @@ export class PdfViewStateManager {
     const scroll = root.querySelector<HTMLElement>(".lumen-scroll");
     if (!root.isConnected || !root.clientWidth || !scroll?.clientHeight
       || root.ownerDocument.defaultView?.getComputedStyle(root).visibility === "hidden") return false;
-    view.restorePage(page);
+    if (position) view.restorePage(position.page);
     return true;
   }
 
@@ -230,13 +248,12 @@ export class PdfViewStateManager {
     const page = Number.parseInt(root.querySelector<HTMLInputElement>(".lumen-page-input")?.value ?? "1", 10);
     const zoom = Math.round(view.currentZoom(root) * 100) / 100;
     if (!Number.isFinite(page) || !Number.isFinite(zoom)) return;
-    const key = stateKey(view, path);
-    const previous = this.data.pdfs[key];
+    const key = zoomKey(view, path);
     const changedPage = this.lastPages.has(root) && this.lastPages.get(root) !== page;
     this.lastPages.set(root, page);
     const hash = this.documentHashes.get(root) ?? view.getDocumentHash();
     const position = hash ? this.positions.get(hash) : null;
-    const updatedAt = changedPage ? Math.max(Date.now(), (position?.updatedAt ?? 0) + 1) : this.pageTimes.get(root) ?? previous?.updatedAt ?? 0;
+    const updatedAt = changedPage ? Math.max(Date.now(), (position?.updatedAt ?? 0) + 1, (this.pageTimes.get(root) ?? 0) + 1) : this.pageTimes.get(root) ?? 0;
     this.pageTimes.set(root, updatedAt);
     if (changedPage && hash) {
       const next = { page: Math.max(1, page), updatedAt };
@@ -244,14 +261,14 @@ export class PdfViewStateManager {
       this.pendingPositions.set(hash, next);
     }
     this.data.pdfs[key] = {
-      page: Math.max(1, page),
       zoom: Math.max(view.minimumZoom(), Math.min(4, zoom)),
-      updatedAt,
       mobileFit: view.usesMobileFit() || undefined,
     };
-    this.data.pdfs = Object.fromEntries(Object.entries(this.data.pdfs)
-      .sort((a, b) => b[1].updatedAt - a[1].updatedAt)
-      .slice(0, MAX_ENTRIES));
+    const updatedZoom = this.data.pdfs[key];
+    delete this.data.pdfs[key];
+    this.data.pdfs[key] = updatedZoom;
+    const entries = Object.entries(this.data.pdfs);
+    if (entries.length > MAX_ENTRIES) this.data.pdfs = Object.fromEntries(entries.slice(-MAX_ENTRIES));
     this.scheduleSave();
   }
 
@@ -271,7 +288,7 @@ export class PdfViewStateManager {
       this.positions.set(hash, newerPosition(this.positions.get(hash) ?? null, stored)!);
       if (this.pendingPositions.get(hash) === position) this.pendingPositions.delete(hash);
     }
-    await this.persist({ version: 1, pdfs: { ...this.data.pdfs } });
+    await this.persist({ version: 2, pdfs: { ...this.data.pdfs } });
   }
 
   async flush(): Promise<void> {

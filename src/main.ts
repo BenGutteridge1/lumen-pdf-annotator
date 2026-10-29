@@ -7,7 +7,7 @@ import { disposePdfRuntime } from "./pdf-runtime";
 import { AnnotationBundleInfo, BundleInfo, exportAnnotationBundle, listAnnotationBundles, listBundles, restoreBundle, verifyBundle } from "./storage";
 import { LumenPdfView, LUMEN_VIEW_TYPE, PdfTheme } from "./view";
 import { PdfViewStateManager } from "./view-state";
-import { READING_POSITION_FOLDER } from "./reading-position";
+import { isSharedReadingStatePath } from "./reading-position";
 
 interface LumenSettings {
   defaultViewer: boolean;
@@ -123,7 +123,7 @@ export default class LumenPdfPlugin extends Plugin {
     });
     // GitSync can finish its pull after the app returns to the foreground.
     const refreshSyncedPage = (file: TFile) => {
-      if (file.path.startsWith(`${READING_POSITION_FOLDER}/`) && file.extension === "md") this.viewState.attachAll();
+      if (isSharedReadingStatePath(file.path)) this.viewState.attachAll();
     };
     this.registerEvent(this.app.vault.on("modify", refreshSyncedPage));
     this.registerEvent(this.app.vault.on("create", file => { if (file instanceof TFile) refreshSyncedPage(file); }));
