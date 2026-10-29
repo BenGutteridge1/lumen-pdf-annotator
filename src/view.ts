@@ -7,6 +7,7 @@ import { buildQuoteTextRuns, extendAnnotationQuote, normalizeQuoteText, quoteAnc
 import { annotationTarget, comparableFileName, QuoteAnnotationRecord, quoteAnnotations } from "./legacy";
 import { loadPdf } from "./pdf-runtime";
 import { DesktopPdfZoom } from "./desktop-zoom";
+import { MobilePdfZoom } from "./mobile-zoom";
 import {
   cacheOutlineHeadingLocation,
   centeredOutlineScrollTop,
@@ -257,6 +258,7 @@ export class LumenPdfView extends FileView {
   private pdfWorker: PDFWorker | null = null;
   private workerPort: Worker | null = null;
   private bundle: DocumentBundle | null = null;
+  private documentHash: string | null = null;
   private index = new AnnotationIndex();
   private rootEl!: HTMLElement;
   private scrollEl!: HTMLElement;
@@ -290,6 +292,9 @@ export class LumenPdfView extends FileView {
   private zoom = 1.25;
   private desktopZoom: DesktopPdfZoom | null = null;
   private desktopZoomPreview: number | null = null;
+  private mobileZoom: MobilePdfZoom | null = null;
+  private mobileZoomAnchor: ZoomAnchor | null = null;
+  private mobilePinchSuppressUntil = 0;
   private mobileFitMode = this.mobileRuntime;
   private baselineWidth = 760;
   private baselineHeight = 984;
@@ -459,33 +464,49 @@ export class LumenPdfView extends FileView {
     if (generation !== this.documentGeneration) return;
     const bundle = await openBundle(this.app.vault, file, bytes, this.automaticPdfBackups, () => this.reportAnnotationChange());
     if (generation !== this.documentGeneration) return;
-    const indexPromise = bundle.repository.load();
-    const loaded = await loadPdf(bytes, this.mobileRuntime);
-    if (generation !== this.documentGeneration) {
-      try { await loaded.document?.destroy?.(); } catch { /* a newer document owns the view */ }
-      try { await Promise.resolve(loaded.worker?.destroy?.()); } catch { /* already gone */ }
-      loaded.port?.terminate();
-      return;
+    // Mobile WebViews have a small process budget. Restore annotations before
+    // starting PDF parsing/canvases, instead of overlapping both memory peaks.
+    // Attach a rejection handler immediately on desktop too: worker startup
+    // can fail before the annotation read settles.
+    const indexPromise = bundle.repository.load().then(index => ({ index }), (error: unknown) => ({ error }));
+    const mobileIndex = this.mobileRuntime ? await indexPromise : null;
+    if (generation !== this.documentGeneration) return;
+    if (mobileIndex && "error" in mobileIndex) throw mobileIndex.error;
+    try {
+      const loaded = await loadPdf(bytes, this.mobileRuntime);
+      if (generation !== this.documentGeneration) {
+        try { await loaded.document?.destroy?.(); } catch { /* a newer document owns the view */ }
+        try { await Promise.resolve(loaded.worker?.destroy?.()); } catch { /* already gone */ }
+        loaded.port?.terminate();
+        return;
+      }
+      this.pdfDocument = loaded.document;
+      this.pdfWorker = loaded.worker;
+      this.workerPort = loaded.port;
+      this.documentHash = bundle.hash;
+      this.buildShell(file);
+      await this.buildPages(generation);
+      if (generation !== this.documentGeneration) return;
+      this.readerReady = true;
+      try { this.onReaderReady?.(); }
+      catch (error) { console.warn("Lumen could not initialize PDF view state", error); }
+      const restored = mobileIndex ?? await indexPromise;
+      if (generation !== this.documentGeneration) return;
+      if ("error" in restored) {
+        throw restored.error;
+      }
+      this.bundle = bundle;
+      this.index = restored.index;
+      this.reportAnnotationChange();
+      for (const state of this.mountedPages) this.renderMarks(state.pageNumber);
+      this.refreshInspector();
+      window.setTimeout(() => {
+        if (generation === this.documentGeneration) void this.loadOutline(generation);
+      }, 0);
+    } catch (error) {
+      if (generation === this.documentGeneration) await this.teardownDocument();
+      throw error;
     }
-    this.pdfDocument = loaded.document;
-    this.pdfWorker = loaded.worker;
-    this.workerPort = loaded.port;
-    this.buildShell(file);
-    await this.buildPages(generation);
-    if (generation !== this.documentGeneration) return;
-    this.readerReady = true;
-    try { this.onReaderReady?.(); }
-    catch (error) { console.warn("Lumen could not initialize PDF view state", error); }
-    const index = await indexPromise;
-    if (generation !== this.documentGeneration) return;
-    this.bundle = bundle;
-    this.index = index;
-    this.reportAnnotationChange();
-    for (const state of this.mountedPages) this.renderMarks(state.pageNumber);
-    this.refreshInspector();
-    window.setTimeout(() => {
-      if (generation === this.documentGeneration) void this.loadOutline(generation);
-    }, 0);
   }
 
   async onUnloadFile(): Promise<void> {
@@ -588,6 +609,11 @@ export class LumenPdfView extends FileView {
     return this.setZoom(zoom);
   }
   isMobileView(): boolean { return this.mobileRuntime; }
+  getDocumentHash(): string | null { return this.documentHash; }
+  canRestoreReadingPosition(): boolean {
+    return this.readerReady && !this.isScrolling && this.desktopZoomPreview === null && !this.mobileSuspended
+      && !this.editor && !this.selectionPalette;
+  }
   isReaderReady(): boolean { return this.readerReady; }
   usesMobileFit(): boolean { return this.mobileRuntime && this.mobileFitMode; }
   minimumZoom(): number { return this.mobileRuntime ? 0.25 : 0.5; }
@@ -657,6 +683,33 @@ export class LumenPdfView extends FileView {
       commit: (zoom, x, y) => this.commitDesktopZoom(zoom, x, y),
       cancel: () => this.clearDesktopZoomPreview(),
     });
+    else this.mobileZoom = new MobilePdfZoom(this.scrollEl, {
+      isReady: () => this.readerReady && Boolean(this.pdfDocument) && !this.mobileSuspended
+        && this.rootEl.isConnected && this.scrollEl.clientWidth > 0 && this.scrollEl.clientHeight > 0,
+      currentZoom: () => this.zoom,
+      begin: (x, y) => {
+        this.mobileZoomAnchor = this.captureZoomAnchor(x, y);
+        this.mobilePinchSuppressUntil = Number.POSITIVE_INFINITY;
+        this.cancelMobileLongPress();
+        window.clearTimeout(this.selectionChangeTimer);
+        this.containerEl.ownerDocument.defaultView?.getSelection()?.removeAllRanges();
+        this.beginDesktopZoom();
+      },
+      preview: (zoom, x, y) => this.previewDesktopZoom(zoom, x, y, this.mobileZoomAnchor),
+      commit: (zoom, x, y) => {
+        this.mobilePinchSuppressUntil = Date.now() + 400;
+        this.mobileZoomAnchor = null;
+        this.commitDesktopZoom(zoom, x, y);
+      },
+      cancel: () => {
+        this.mobilePinchSuppressUntil = Date.now() + 400;
+        this.clearDesktopZoomPreview();
+        this.restoreZoomAnchor(this.mobileZoomAnchor);
+        this.mobileZoomAnchor = null;
+        this.updateCurrentPage();
+        this.resumeDesktopZoomWork();
+      },
+    });
     this.searchPanel = this.rootEl.createDiv({ cls: "lumen-search-panel" });
     this.outlinePanel = this.rootEl.createDiv({ cls: "lumen-outline-panel" });
     this.inspector = this.rootEl.createDiv({ cls: "lumen-inspector" });
@@ -665,7 +718,7 @@ export class LumenPdfView extends FileView {
     this.buildOutlinePanel();
     this.buildInspector();
     this.pagesEl.addEventListener("click", event => {
-      if (this.suppressNextAnnotationClick) {
+      if (this.suppressNextAnnotationClick || Date.now() < this.mobilePinchSuppressUntil) {
         this.suppressNextAnnotationClick = false;
         event.preventDefault();
         event.stopPropagation();
@@ -1247,6 +1300,13 @@ export class LumenPdfView extends FileView {
     state.quoteRangeVersion = undefined;
   }
 
+  private releaseCanvases(host: HTMLElement): void {
+    host.querySelectorAll("canvas").forEach(canvas => {
+      canvas.width = 0;
+      canvas.height = 0;
+    });
+  }
+
   private schedulePageMount(state: PageState): void {
     if (state.rendering || this.queuedPageMounts.has(state) || !this.pageNeedsCanvasWork(state)) {
       if (!this.isScrolling && state.canvasReady) this.scheduleTextLayer(state);
@@ -1339,29 +1399,40 @@ export class LumenPdfView extends FileView {
       canvas.style.width = `${cssViewport.width}px`;
       canvas.style.height = `${cssViewport.height}px`;
       const context = canvas.getContext("2d", { alpha: false });
-      if (!context) throw new Error("Canvas 2D context is unavailable");
+      if (!context) {
+        canvas.width = 0;
+        canvas.height = 0;
+        throw new Error("Canvas 2D context is unavailable");
+      }
       const hadReadyCanvas = state.canvasReady;
       if (!hadReadyCanvas) canvasHost.replaceChildren(canvas);
-      const renderTask = page.render({ canvasContext: context, viewport: renderViewport });
-      state.renderTask = renderTask;
-      renderTask.onContinue = (resume: () => void) => {
-        if (!state.mounted || generation !== state.renderGeneration || (!force && !state.wanted)) {
-          renderTask.cancel();
-          return;
-        }
-        window.requestAnimationFrame(() => {
-          if (state.mounted && generation === state.renderGeneration && (force || state.wanted)) resume();
-          else renderTask.cancel();
-        });
-      };
+      let renderTask: RenderTask | undefined;
       let rendered = false;
       try {
-        await renderTask.promise;
+        const task = page.render({ canvasContext: context, viewport: renderViewport });
+        renderTask = task;
+        state.renderTask = task;
+        task.onContinue = (resume: () => void) => {
+          if (!state.mounted || generation !== state.renderGeneration || (!force && !state.wanted)) {
+            task.cancel();
+            return;
+          }
+          window.requestAnimationFrame(() => {
+            if (state.mounted && generation === state.renderGeneration && (force || state.wanted)) resume();
+            else task.cancel();
+          });
+        };
+        await task.promise;
         rendered = true;
       } catch (error) {
         if (errorName(error) !== "RenderingCancelledException") throw error;
       } finally {
         if (state.renderTask === renderTask) state.renderTask = undefined;
+        if (!rendered || !state.mounted || generation !== state.renderGeneration || (!force && !state.wanted)) {
+          canvas.width = 0;
+          canvas.height = 0;
+          canvas.remove();
+        }
       }
       if (!rendered || !state.mounted || generation !== state.renderGeneration || (!force && !state.wanted)) {
         if (!hadReadyCanvas) {
@@ -1372,7 +1443,10 @@ export class LumenPdfView extends FileView {
         }
         return;
       }
-      if (hadReadyCanvas) canvasHost.replaceChildren(canvas);
+      if (hadReadyCanvas) {
+        this.releaseCanvases(canvasHost);
+        canvasHost.replaceChildren(canvas);
+      }
       state.canvasReady = true;
       state.canvasDetailReady = fullDetail;
       state.renderedPixelRatio = targetPixelRatio;
@@ -1587,8 +1661,10 @@ export class LumenPdfView extends FileView {
     });
   }
 
-  private previewDesktopZoom(zoom: number, clientX: number, clientY: number): void {
-    const anchor = this.captureZoomAnchor(clientX, clientY);
+  private previewDesktopZoom(zoom: number, clientX: number, clientY: number, pinchAnchor?: ZoomAnchor | null): void {
+    const viewport = pinchAnchor ? this.scrollEl.getBoundingClientRect() : null;
+    const anchor = pinchAnchor && viewport ? { ...pinchAnchor, viewportX: clientX - viewport.left, viewportY: clientY - viewport.top }
+      : this.captureZoomAnchor(clientX, clientY);
     this.desktopZoomPreview = zoom;
     this.rootEl.style.setProperty("--lumen-zoom", String(zoom));
     this.rootEl.dataset.zoom = String(zoom);
@@ -1611,7 +1687,7 @@ export class LumenPdfView extends FileView {
     const changed = zoom !== this.zoom;
     const anchor = this.captureZoomAnchor(clientX, clientY);
     this.clearDesktopZoomPreview();
-    void this.setZoom(zoom, false, false);
+    void this.setZoom(zoom, this.mobileRuntime && !changed, false);
     this.restoreZoomAnchor(anchor);
     this.updateCurrentPage();
     if (!changed) {
@@ -1631,6 +1707,7 @@ export class LumenPdfView extends FileView {
     const anchor = preserveViewport ? this.captureReadingZoomAnchor() : null;
     const hadDesktopPreview = this.desktopZoomPreview !== null;
     this.desktopZoom?.cancel();
+    this.mobileZoom?.cancel();
     if (this.mobileRuntime && !preserveMobileFit) this.mobileFitMode = false;
     const rounded = this.mobileRuntime ? Math.round(value * 20) / 20 : Math.round(value * 100) / 100;
     const target = clamp(rounded, this.minimumZoom(), 4);
@@ -1856,6 +1933,7 @@ export class LumenPdfView extends FileView {
     const hidden = this.containerEl.ownerDocument.visibilityState === "hidden";
     if (hidden) {
       this.mobileSuspended = true;
+      this.mobileZoom?.cancel();
       this.searchGeneration++;
       window.clearTimeout(this.selectionChangeTimer);
       this.selectionChangeTimer = 0;
@@ -2125,6 +2203,7 @@ export class LumenPdfView extends FileView {
   }
 
   private scheduleMobileSelectionCapture(clientX?: number, clientY?: number, delay = 170): void {
+    if (Date.now() < this.mobilePinchSuppressUntil) return;
     if (!this.mobileRuntime || !this.rootEl?.isConnected) return;
     window.clearTimeout(this.selectionChangeTimer);
     this.selectionChangeTimer = window.setTimeout(() => {
@@ -2417,6 +2496,7 @@ export class LumenPdfView extends FileView {
     state.markFrame = undefined;
     state.markHitGrid = undefined;
     state.markWideHits = undefined;
+    this.releaseCanvases(markHost);
     markHost.empty();
     const annotations = this.index.onPage(pageNumber);
     const rectCount = annotations.reduce((total, annotation) => total + annotation.rects.length, 0);
@@ -2465,7 +2545,12 @@ export class LumenPdfView extends FileView {
     canvas.style.width = `${width}px`;
     canvas.style.height = `${height}px`;
     const context = canvas.getContext("2d");
-    if (!context) return;
+    if (!context) {
+      canvas.width = 0;
+      canvas.height = 0;
+      canvas.remove();
+      return;
+    }
     context.scale(canvas.width / width, canvas.height / height);
     const hitGrid = new Map<number, PdfAnnotation[]>();
     const wideHits: PdfAnnotation[] = [];
@@ -3608,6 +3693,9 @@ export class LumenPdfView extends FileView {
     this.readerReady = false;
     this.desktopZoom?.dispose();
     this.desktopZoom = null;
+    this.mobileZoom?.dispose();
+    this.mobileZoom = null;
+    this.mobilePinchSuppressUntil = 0;
     this.observer?.disconnect();
     this.observer = null;
     this.pendingPageMounts.length = 0;
@@ -3693,6 +3781,7 @@ export class LumenPdfView extends FileView {
     this.pdfWorker = null;
     this.workerPort = null;
     this.bundle = null;
+    this.documentHash = null;
     this.index = new AnnotationIndex();
     this.contentEl.empty();
   }

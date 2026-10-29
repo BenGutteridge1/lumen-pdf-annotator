@@ -7,6 +7,7 @@ import { disposePdfRuntime } from "./pdf-runtime";
 import { AnnotationBundleInfo, BundleInfo, exportAnnotationBundle, listAnnotationBundles, listBundles, restoreBundle, verifyBundle } from "./storage";
 import { LumenPdfView, LUMEN_VIEW_TYPE, PdfTheme } from "./view";
 import { PdfViewStateManager } from "./view-state";
+import { READING_POSITION_FOLDER } from "./reading-position";
 
 interface LumenSettings {
   defaultViewer: boolean;
@@ -116,6 +117,16 @@ export default class LumenPdfPlugin extends Plugin {
     this.registerEvent(this.app.workspace.on("active-leaf-change", leaf => {
       if (leaf) this.viewState.attach(leaf);
     }));
+    this.registerDomEvent(document, "visibilitychange", () => {
+      if (document.hidden) void this.viewState.flush().catch(error => console.warn("Lumen could not save PDF reading state before backgrounding", error));
+      else this.viewState.attachAll();
+    });
+    // GitSync can finish its pull after the app returns to the foreground.
+    const refreshSyncedPage = (file: TFile) => {
+      if (file.path.startsWith(`${READING_POSITION_FOLDER}/`) && file.extension === "md") this.viewState.attachAll();
+    };
+    this.registerEvent(this.app.vault.on("modify", refreshSyncedPage));
+    this.registerEvent(this.app.vault.on("create", file => { if (file instanceof TFile) refreshSyncedPage(file); }));
     window.setTimeout(() => this.viewState.attachAll(), 0);
     this.annotationSearch.start();
   }

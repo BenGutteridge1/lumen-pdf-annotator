@@ -1,6 +1,6 @@
 {
   "name": "lumen-pdf-annotator",
-  "version": "1.0.26",
+  "version": "1.0.27",
   "private": true,
   "description": "Clean implementation of a performance-first PDF annotator for Obsidian.",
   "repository": {
@@ -16,6 +16,7 @@
     "typecheck": "tsc --noEmit --skipLibCheck",
     "test": "node --test test/*.test.mjs",
     "test:outline": "node --test test/outline-accuracy.test.mjs",
+    "test:browser:build": "node test/browser-mobile-harness.mjs",
     "lint": "eslint .",
     "build": "tsc --noEmit --skipLibCheck && node esbuild.config.mjs production"
   },

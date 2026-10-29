@@ -23,9 +23,11 @@ async function bundle(entry, mobile = false) {
 }
 
 const { DesktopPdfZoom } = await bundle('src/desktop-zoom.ts');
+const { MobilePdfZoom } = await bundle('src/mobile-zoom.ts');
 const { LumenPdfView } = await bundle('src/view.ts');
 const { LumenPdfView: MobilePdfView } = await bundle('src/view.ts', true);
 const { PdfViewStateManager, LumenPdfView: StatePdfView } = await bundle('src/view-state.ts');
+const { PdfViewStateManager: MobileStateManager, LumenPdfView: MobileStatePdfView } = await bundle('src/view-state.ts', true);
 
 class Scheduler {
   now = 0;
@@ -86,6 +88,7 @@ class ElementFixture extends EventTarget {
   }
   createDiv({ cls } = {}) { const child = new ElementFixture(this.ownerDocument, cls); this.append(child); return child; }
   append(child) { this.children.push(child); child.parentElement = this; }
+  contains(node) { return node === this || this.children.some(child => child.contains(node)); }
   empty() { this.children.length = 0; }
   remove() { this.isConnected = false; }
   addClass(name) { this.classList.add(name); }
@@ -128,6 +131,79 @@ function wheel(target, overrides = {}) {
   target.dispatchEvent(event);
   return event;
 }
+
+function touch(target, name, points, options = {}) {
+  const event = new Event(name, { cancelable: options.cancelable ?? true });
+  const touches = points.map(([identifier, clientX, clientY, touchTarget = target]) => ({ identifier, clientX, clientY, target: touchTarget }));
+  Object.assign(event, { touches, targetTouches: touches, ...options });
+  target.dispatchEvent(event);
+  return event;
+}
+
+test('mobile pinch leaves one-finger input native, previews once per frame and commits once at two-finger end', () => {
+  const { scheduler, viewport } = environment();
+  const calls = { begin: [], preview: [], commit: [], cancel: 0 };
+  const control = new MobilePdfZoom(viewport, {
+    isReady: () => true, currentZoom: () => 1,
+    begin: (...args) => calls.begin.push(args), preview: (...args) => calls.preview.push(args),
+    commit: (...args) => calls.commit.push(args), cancel: () => { calls.cancel++; },
+  });
+  assert.equal(touch(viewport, 'touchstart', [[4, 300, 400]]).defaultPrevented, false);
+  assert.equal(touch(viewport, 'touchmove', [[4, 300, 420]]).defaultPrevented, false);
+  assert.equal(control.active, false);
+  assert.equal(touch(viewport, 'touchstart', [[4, 300, 400], [8, 500, 400]]).defaultPrevented, true);
+  for (let index = 0; index < 40; index++) touch(viewport, 'touchmove', [[8, 650, 450], [4, 350, 450]]);
+  assert.equal(scheduler.frames.size, 1);
+  scheduler.frame();
+  assert.deepEqual(calls.begin, [[400, 400]]);
+  assert.deepEqual(calls.preview, [[1.5, 500, 450]]);
+  touch(viewport, 'touchmove', [[4, 375, 450], [8, 625, 450]]);
+  touch(viewport, 'touchend', [[4, 375, 450]]); // Flushes the pending final frame.
+  touch(viewport, 'touchend', []);
+  assert.deepEqual(calls.commit, [[1.25, 500, 450]]);
+  assert.equal(control.active, false);
+  assert.equal(scheduler.frames.size + scheduler.timers.size, 0);
+  control.dispose();
+  assert.equal(touch(viewport, 'touchstart', [[1, 300, 400], [2, 500, 400]]).defaultPrevented, false);
+});
+
+test('mobile pinch bounds, cancellation and disposal never leave preview work behind', () => {
+  for (const reason of ['cancel', 'third-finger', 'unavailable', 'dispose']) {
+    const { scheduler, viewport } = environment();
+    let ready = true, canceled = 0, commits = 0;
+    const previews = [];
+    const control = new MobilePdfZoom(viewport, { isReady: () => ready, currentZoom: () => 1,
+      begin() {}, preview: value => previews.push(value), commit: () => { commits++; }, cancel: () => { canceled++; } });
+    touch(viewport, 'touchstart', [[1, 300, 400], [2, 500, 400]]);
+    touch(viewport, 'touchmove', [[1, 0, 400], [2, 2000, 400]]); scheduler.frame();
+    touch(viewport, 'touchmove', [[1, 300, 400], [2, 301, 400]]); scheduler.frame();
+    assert.deepEqual(previews, [4, .25]);
+    touch(viewport, 'touchmove', [[1, 300, 400], [2, 600, 400]]);
+    if (reason === 'cancel') touch(viewport, 'touchcancel', []);
+    else if (reason === 'third-finger') touch(viewport, 'touchstart', [[1, 300, 400], [2, 600, 400], [3, 700, 400]]);
+    else if (reason === 'unavailable') { ready = false; scheduler.frame(); }
+    else control.dispose();
+    scheduler.frame();
+    assert.equal(canceled, 1);
+    assert.equal(commits, 0);
+    assert.equal(control.active, false);
+    assert.equal(scheduler.frames.size, 0);
+  }
+});
+
+test('mobile pinch accepts fingers on different PDF descendants and rejects a finger outside its viewport', () => {
+  const { viewport, doc } = environment();
+  const firstMark = viewport.createDiv(), secondText = viewport.createDiv();
+  const outside = new ElementFixture(doc);
+  let begins = 0;
+  const control = new MobilePdfZoom(viewport, { isReady: () => true, currentZoom: () => 1,
+    begin: () => { begins++; }, preview() {}, commit() {}, cancel() {} });
+  assert.equal(touch(viewport, 'touchstart', [[1, 300, 400, firstMark], [2, 500, 400, outside]], {targetTouches:[]}).defaultPrevented, false);
+  assert.equal(begins, 0);
+  assert.equal(touch(viewport, 'touchstart', [[1, 300, 400, firstMark], [2, 500, 400, secondText]], {targetTouches:[]}).defaultPrevented, true);
+  assert.equal(begins, 1);
+  control.dispose();
+});
 
 function controller(initialZoom = 1.25) {
   const { scheduler, viewport } = environment();
@@ -507,10 +583,55 @@ test('mobile does not install a wheel handler and retains its fit/scale rules', 
   assert.equal(view.currentZoom(), 1.1);
 });
 
+test('actual mobile pinch follows its moving midpoint, preserves layer data, saves final scale and resets to fit', async () => {
+  const { view, scheduler, scrollEl, rootEl } = renderer({ mobile: true });
+  scrollEl.scrollTop = 4300;
+  let changed = 0, released = 0;
+  rootEl.addEventListener('lumen-zoom-change', () => { changed++; });
+  const state = view.pages.get(5);
+  view.ensurePageLayers(state); state.mounted = true; state.canvasReady = true;
+  view.mountedPages.add(state);
+  const stage = state.stage;
+  const release = view.releasePageLayers.bind(view);
+  view.releasePageLayers = value => { released++; release(value); };
+  const before = view.captureZoomAnchor(500, 400);
+  touch(scrollEl, 'touchstart', [[1, 400, 400], [2, 600, 400]]);
+  touch(scrollEl, 'touchmove', [[1, 450, 440], [2, 750, 440]]);
+  scheduler.frame();
+  const after = view.captureZoomAnchor(600, 440);
+  assert.equal(after.page, before.page);
+  assert.ok(Math.abs(after.xRatio - before.xRatio) < 1e-10);
+  assert.ok(Math.abs(after.yRatio - before.yRatio) < 1e-10);
+  assert.equal(rootEl.classList.contains('is-zooming'), true);
+  assert.equal(state.stage, stage);
+  assert.equal(released, 0);
+  assert.equal(view.canRestoreReadingPosition(), false);
+  touch(scrollEl, 'touchend', []);
+  assert.equal(view.currentZoom(), 1.9);
+  assert.equal(view.usesMobileFit(), false);
+  assert.equal(released, 1);
+  assert.equal(changed, 1);
+  assert.equal(rootEl.classList.contains('is-zooming'), false);
+  const final = view.captureZoomAnchor(600, 440);
+  assert.ok(Math.abs(final.xRatio - before.xRatio) < 1e-10);
+  assert.ok(Math.abs(final.yRatio - before.yRatio) < 1e-10);
+  view.resetZoom();
+  assert.equal(view.usesMobileFit(), true);
+  assert.equal(view.currentZoom(), 1.1);
+  touch(scrollEl, 'touchstart', [[1, 400, 400], [2, 600, 400]]);
+  touch(scrollEl, 'touchmove', [[1, 350, 400], [2, 650, 400]]); scheduler.frame();
+  await view.teardownDocument(false);
+  assert.equal(view.mobileZoom, null);
+  assert.equal(rootEl.classList.contains('is-zooming'), false);
+  assert.equal(scheduler.frames.size + scheduler.timers.size, 0);
+});
+
 test('precise desktop zoom saves from a gesture without scrolling, restores, and uses the usual button stops', async () => {
   const { view, scheduler, rootEl, scrollEl } = renderer({ ViewClass: StatePdfView });
   const manager = new PdfViewStateManager({ loadData: async () => ({}) }, async () => {});
   manager.attach({ view });
+  await Promise.resolve();
+  await Promise.resolve();
   wheel(scrollEl, { deltaY: -5 });
   scheduler.advance(160);
   scheduler.advance(450);
@@ -545,4 +666,147 @@ test('detached-root state cleanup keeps the previous PDF scale after the same vi
   manager.capture(view, rootEl, 'fixture.pdf', true);
   assert.equal(manager.data.pdfs['fixture.pdf'].zoom, 1.37);
   assert.equal(view.currentZoom(), 2);
+});
+
+function stateVault() {
+  const files = new Map();
+  return { files, adapter: {
+    exists: async path => files.has(path), read: async path => files.get(path),
+    write: async (path, text) => { files.set(path, text); }, mkdir: async path => { files.set(path, ''); },
+  } };
+}
+
+async function stateReader(vault, mobile = false, initialData = {}, path = 'fixture.pdf') {
+  const fixture = renderer({ mobile, count: 20, ViewClass: mobile ? MobileStatePdfView : StatePdfView });
+  fixture.view.file.path = path;
+  fixture.view.getDocumentHash = () => 'a'.repeat(64);
+  let data = initialData;
+  const Manager = mobile ? MobileStateManager : PdfViewStateManager;
+  const manager = new Manager({ app: { vault }, loadData: async () => data }, async state => { data = { pdfViewState: state }; });
+  await manager.load();
+  manager.attach({ view: fixture.view });
+  await new Promise(resolve => setImmediate(resolve));
+  return { ...fixture, manager, data: () => data };
+}
+
+test('Git-synced vault state shares page in both directions, keeps device zoom and survives PDF renames', async () => {
+  const vault = stateVault();
+  const desktop = await stateReader(vault);
+  await desktop.view.restoreZoom(1.37);
+  desktop.view.restorePage(7);
+  await desktop.manager.flush();
+  const positionPath = [...vault.files.keys()].find(path => path.endsWith('.md'));
+  assert.ok(positionPath.startsWith('Lumen PDF state/'));
+  assert.match(vault.files.get(positionPath), /lumen-page: 7/);
+
+  // The phone has its own plugin settings; only ordinary vault files sync.
+  const mobile = await stateReader(vault, true);
+  assert.equal(mobile.view.pageInput.value, '7');
+  assert.equal(mobile.view.usesMobileFit(), true);
+  assert.equal(mobile.view.currentZoom(), 1.1);
+  await mobile.view.restoreZoom(.75, false);
+  mobile.view.restorePage(11);
+  await mobile.manager.flush();
+  const phonePosition = vault.files.get(positionPath);
+
+  // Closing an old desktop tab or changing only its zoom cannot reset it.
+  await desktop.view.restoreZoom(2);
+  await desktop.manager.flush();
+  await desktop.manager.flush();
+  assert.equal(vault.files.get(positionPath), phonePosition);
+  const reopened = await stateReader(vault, false, desktop.data());
+  assert.equal(reopened.view.pageInput.value, '11');
+  assert.equal(reopened.view.currentZoom(), 2);
+  const renamed = await stateReader(vault, true, {}, 'renamed.pdf');
+  assert.equal(renamed.view.pageInput.value, '11');
+  assert.equal(renamed.view.usesMobileFit(), true);
+});
+
+test('activating an idle reader refreshes a synced page while active scrolling and unsaved navigation are protected', async () => {
+  const vault = stateVault();
+  const desktop = await stateReader(vault);
+  desktop.view.restorePage(4);
+  await desktop.manager.flush();
+  const phone = await stateReader(vault, true);
+  assert.equal(phone.view.pageInput.value, '4');
+  desktop.view.restorePage(9);
+  await desktop.manager.flush();
+  phone.view.isScrolling = true;
+  phone.manager.attach({ view: phone.view });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(phone.view.pageInput.value, '4');
+  phone.view.isScrolling = false;
+  phone.manager.attach({ view: phone.view });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(phone.view.pageInput.value, '9');
+  desktop.view.restorePage(12);
+  await desktop.manager.flush();
+  phone.view.restorePage(7); // Scroll/page input has changed before debounce.
+  phone.manager.attach({ view: phone.view });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(phone.view.pageInput.value, '7');
+});
+
+test('old platform records migrate the newest page without inheriting the other platform zoom', async () => {
+  const vault = stateVault();
+  const desktop = await stateReader(vault, false, { pdfViewState: { version: 1, pdfs: {
+    'fixture.pdf': { page: 3, zoom: 1.37, updatedAt: 10 },
+    'mobile:fixture.pdf': { page: 8, zoom: .75, updatedAt: 20, mobileFit: false },
+  } } });
+  assert.equal(desktop.view.pageInput.value, '8');
+  assert.equal(desktop.view.currentZoom(), 1.37);
+  await desktop.manager.flush();
+  assert.match([...vault.files.values()].join('\n'), /lumen-page: 8/);
+});
+
+test('dense annotation repaint releases its previous canvas before detaching it', () => {
+  const { view } = renderer({ mobile: true });
+  const state = view.pages.get(1);
+  view.ensurePageLayers(state);
+  state.mounted = true;
+  const previous = { width: 1400, height: 2000 };
+  state.markHost.querySelectorAll = () => [previous];
+  view.renderMarks(1);
+  assert.deepEqual(previous, { width: 0, height: 0 });
+});
+
+test('mobile canvas upgrades release canceled/failed replacements and old successful backing stores', async () => {
+  for (const result of ['cancel', 'reject', 'throw', 'success']) {
+    const { view, doc } = renderer({ mobile: true });
+    const state = view.pages.get(1);
+    view.ensurePageLayers(state);
+    state.wanted = true;
+    state.mounted = true;
+    state.canvasReady = true;
+    const previous = { width: 100, height: 100 };
+    state.canvasHost.querySelectorAll = () => [previous];
+    state.canvasHost.replaceChildren = canvas => { state.replacement = canvas; };
+    let candidate;
+    globalThis.createEl = () => {
+      candidate = new ElementFixture(doc);
+      candidate.getContext = () => ({});
+      return candidate;
+    };
+    const error = Object.assign(new Error(result), { name: result === 'cancel' ? 'RenderingCancelledException' : 'Error' });
+    state.page = { getViewport: ({ scale }) => ({ width: 600 * scale, height: 800 * scale }), render: () => {
+      if (result === 'throw') throw error;
+      return { promise: result === 'success' ? Promise.resolve() : Promise.reject(error) };
+    } };
+    view.scheduleTextLayer = () => {};
+    view.renderMarks = () => {};
+    view.renderSearchMarks = () => {};
+    if (result === 'reject' || result === 'throw') await assert.rejects(view.mountPage(state, true), error);
+    else await view.mountPage(state, true);
+    assert.equal(state.rendering, false);
+    if (result === 'success') {
+      assert.deepEqual(previous, { width: 0, height: 0 });
+      assert.ok(candidate.width * candidate.height <= 6_000_000);
+      assert.equal(state.replacement, candidate);
+    } else {
+      assert.equal(candidate.width, 0);
+      assert.equal(candidate.height, 0);
+      assert.deepEqual(previous, { width: 100, height: 100 });
+      assert.equal(state.canvasReady, true);
+    }
+  }
 });

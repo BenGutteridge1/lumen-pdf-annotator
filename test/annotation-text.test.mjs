@@ -219,6 +219,37 @@ test('invalid optional ranges do not discard annotations from storage', async ()
   assert.deepEqual(JSON.parse(JSON.stringify(index.get(valid.id))), valid);
 });
 
+test('large desktop snapshots parse bounded individual records and keep punctuation/escapes intact', async () => {
+  const records = Array.from({ length: 2500 }, (_, index) => annotation({ id: `mark-${index}`,
+    quote: 'Nested punctuation: [ ] { }, quote: " and slash: \\ and newline\n',
+    rects: [rect(), null, { x: 'Infinity', y: 0, width: 1, height: 1 }],
+  }));
+  const json = JSON.stringify(records);
+  const { vault } = memoryVault({ 'bundle/annotations.snapshot.json': json });
+  const parse = JSON.parse;
+  let largest = 0;
+  JSON.parse = value => { largest = Math.max(largest, value.length); return parse(value); };
+  let index;
+  try { index = await new AnnotationRepository(vault, 'bundle', 'hash', 'Document.pdf').load(); }
+  finally { JSON.parse = parse; }
+  assert.equal(index.size, 2500);
+  assert.equal(index.get('mark-2499').quote, records[2499].quote);
+  assert.equal(index.get('mark-2499').rects.length, 1);
+  assert.ok(largest < 2000, `JSON.parse received ${largest} characters from a ${json.length}-character file`);
+});
+
+test('malformed compact snapshots fall back completely instead of exposing partial annotations', async () => {
+  const good = JSON.stringify([annotation({ id: 'fallback' })]);
+  for (const broken of ['{}', '[', '[1,]', '[{}] trailing', '[{},', '["unterminated]', `[${JSON.stringify(annotation())},]`]) {
+    const { vault } = memoryVault({ 'bundle/annotations.snapshot.json': broken,
+      'bundle/annotations.snapshot.previous.json': good,
+      'bundle/annotations.journal.jsonl': '\ninvalid\n' + JSON.stringify({ op: 'put', annotation: annotation({ id: 'journal' }) }),
+    });
+    const index = await new AnnotationRepository(vault, 'bundle', 'hash', 'Document.pdf').load();
+    assert.deepEqual(index.all().map(item => item.id), ['fallback', 'journal'], broken);
+  }
+});
+
 test('expanded page offsets carry a page version even when selection follows the repaired run', () => {
   assert.equal(quoteRangeVersionForItems([item('unaffected')]), 1);
   const items = [{ ...item('fi'), lumenTextRepaired: true }, item('the', { x: 30 })];

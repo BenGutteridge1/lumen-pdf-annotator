@@ -1,0 +1,175 @@
+<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lumen mobile integration checks</title><link rel="stylesheet" href="styles.css">
+<style>
+:root{font-family:system-ui;color:#24262c;background:#f2f4f8;--text-normal:#24262c;--text-muted:#667085;--text-faint:#9aa0ae;--background-primary:white;--background-secondary:#f5f6fa;--background-modifier-border:#d7dce5;--interactive-accent:#6955dc;--interactive-accent-hsl:249,65%,60%;--text-on-accent:white;--font-interface:system-ui;--font-text:system-ui;--font-ui-small:13px;--radius-s:5px;--radius-m:8px}
+body{margin:24px}h1{font-size:23px;margin:0 0 12px}p{max-width:920px;color:#667085}button{cursor:pointer;font:inherit}#run{padding:10px 18px;background:#6955dc;color:white;border:0;border-radius:8px}#status{font-weight:600;padding:12px 0}#results{padding-left:24px;line-height:1.8}#readers{display:flex;gap:20px;align-items:start;flex-wrap:wrap}.reader-frame{position:relative;width:390px;height:680px;background:white;border:1px solid #ccd3e0;border-radius:12px;overflow:hidden}.reader-frame.desktop{width:780px}.view-content{width:100%;height:100%;padding:0}input,select,button{font:inherit}.check-pass{color:#146c35}.check-fail{color:#b42318}
+</style>
+<h1>Lumen mobile integration checks</h1>
+<p>Exercises the actual reader, bundled PDF.js worker, annotation storage and reading-state manager in a browser host. Uses an original synthetic 12-page PDF and 2,880 desktop-format annotations. The two readers have separate plugin settings and share only normal vault files.</p>
+<button id="run">Run mobile checks</button><div id="status">Ready</div><ol id="results"></ol><div id="readers"></div>
+<p>After the checks pass, the remaining phone reader accepts real two-finger touch gestures. Pinch inside its PDF content, then use the toolbar reset button to restore fit-to-width. One finger still scrolls and tapping a mark opens its editor.</p>
+<script src="harness.js"></script><script>
+const { LumenPdfView, PdfViewStateManager, ReadingPositionStore, Platform, TFile } = LumenHarness;
+const canvasHistory = [];
+function element(tag, options = {}, parent) {
+  const node = document.createElement(tag);
+  if (options.cls) node.className = options.cls;
+  if (options.text !== undefined) node.textContent = options.text;
+  for (const [key, value] of Object.entries(options.attr || {})) node.setAttribute(key, value);
+  if (parent) parent.append(node);
+  if (tag === 'canvas') canvasHistory.push(node);
+  return node;
+}
+HTMLElement.prototype.createEl = function(tag, options) { return element(tag, options, this); };
+HTMLElement.prototype.createDiv = function(options) { return element('div', options, this); };
+HTMLElement.prototype.createSpan = function(options) { return element('span', options, this); };
+HTMLElement.prototype.empty = function() { this.replaceChildren(); };
+HTMLElement.prototype.addClass = function(...classes) { this.classList.add(...classes); };
+HTMLElement.prototype.removeClass = function(...classes) { this.classList.remove(...classes); };
+HTMLElement.prototype.setCssProps = function(values) { for (const [key, value] of Object.entries(values)) this.style.setProperty(key, value); };
+globalThis.createEl = (tag, options) => element(tag, options);
+globalThis.createDiv = options => element('div', options);
+globalThis.createFragment = () => document.createDocumentFragment();
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+async function until(fn, timeout = 8000) { const end = performance.now() + timeout; while (!fn()) { if (performance.now() > end) throw Error('Timed out waiting for reader'); await delay(40); } }
+function assert(value, message) { if (!value) throw Error(message); }
+function touch(target, name, points) {
+  const event = new Event(name, {cancelable:true,bubbles:true});
+  const touches = points.map(([identifier,clientX,clientY])=>({identifier,clientX,clientY,target}));
+  Object.assign(event,{touches,targetTouches:touches}); target.dispatchEvent(event); return event;
+}
+function pdfBytes(count = 12) {
+  const objects = [];
+  const font = 3 + count * 2;
+  objects.push('<< /Type /Catalog /Pages 2 0 R >>');
+  objects.push(`<< /Type /Pages /Kids [${Array.from({length:count},(_,i)=>`${3+i*2} 0 R`).join(' ')}] /Count ${count} >>`);
+  for (let i = 0; i < count; i++) {
+    const page = 3 + i * 2;
+    const content = `BT /F1 18 Tf 50 720 Td (Lumen mobile test - page ${i+1}) Tj 0 -34 Td (Synthetic original document for annotation and sync checks.) Tj ET`;
+    objects.push(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 ${font} 0 R >> >> /Contents ${page+1} 0 R >>`);
+    objects.push(`<< /Length ${content.length} >>\nstream\n${content}\nendstream`);
+  }
+  objects.push('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>');
+  let source = '%PDF-1.4\n'; const offsets = [0];
+  objects.forEach((value, i) => { offsets.push(source.length); source += `${i+1} 0 obj\n${value}\nendobj\n`; });
+  const xref = source.length;
+  source += `xref\n0 ${objects.length+1}\n0000000000 65535 f \n${offsets.slice(1).map(value=>`${String(value).padStart(10,'0')} 00000 n \n`).join('')}trailer << /Size ${objects.length+1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF`;
+  return new TextEncoder().encode(source).buffer;
+}
+let active = [];
+async function run() {
+  document.querySelector('#run').disabled = true;
+  document.querySelector('#results').replaceChildren();
+  document.querySelector('#status').textContent = 'Running actual browser reader checks…';
+  const checks = []; window.harnessResult = { status: 'running', checks };
+  const check = (label, value) => { assert(value, label); checks.push(label); element('li', { text: `PASS · ${label}`, cls: 'check-pass' }, document.querySelector('#results')); };
+  try {
+    for (const item of active) await close(item);
+    active = []; document.querySelector('#readers').replaceChildren();
+    const bytes = pdfBytes();
+    const hash = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)), n => n.toString(16).padStart(2,'0')).join('');
+    const files = new Map();
+    const vault = { adapter: { exists: async path => files.has(path), read: async path => { if (!files.has(path)) throw Error(`Missing ${path}`); return files.get(path); }, write: async (path,text) => files.set(path,text), mkdir: async path => files.set(path,''), append: async (path,text) => files.set(path,(files.get(path)||'')+text) }, readBinary: async () => bytes.slice(0), getName: () => 'Synthetic test vault' };
+    const records = Array.from({length:2880}, (_, i) => ({ id:`desktop-${i}`,kind:i%19===0?'page-note':'text',page:Math.floor(i/240)+1,rects:[{x:.08+(i%5)*.17,y:.16+Math.floor((i%240)/5)*.014,width:.14,height:.009}],quote:`Saved desktop quote ${i}: punctuation [ ] { }, " \\`,note:`Saved note ${i}`,tags:['test'],color:['#ffd12d','#83cb67','#6f9fe8'][i%3],style:['highlight','underline','dashed','dotted','strike','box','comment'][i%7],createdAt:i+1,updatedAt:i+1 }));
+    const snapshotPath = `.lumen-pdf/bundles/sha256/${hash}/annotations.snapshot.json`;
+    files.set(snapshotPath, JSON.stringify(records));
+    async function reader(mobile, pluginData = {}, path = 'Synthetic.pdf') {
+      Platform.isMobile = mobile;
+      const frame = element('div', { cls:`reader-frame ${mobile?'mobile':'desktop'}` }, document.querySelector('#readers'));
+      const contentEl = frame.createDiv({cls:'view-content'});
+      const app = { vault, scope: {}, workspace: { getLeavesOfType: () => active.map(item => item.leaf) } };
+      const leaf = { app, contentEl, containerEl: frame };
+      let data = pluginData;
+      const manager = new PdfViewStateManager({ app, loadData: async () => data }, async state => { data = {pdfViewState:state}; });
+      await manager.load();
+      const view = new LumenPdfView(leaf, 'light', undefined, 'PDF annotations', false, () => manager.attach(leaf));
+      leaf.view = view; view.file = new TFile(path, bytes.byteLength);
+      const item = { view, manager, leaf, frame, data: () => data };
+      active.push(item); await view.onOpen(); await view.onLoadFile(view.file);
+      await until(() => manager.activeCaptures.has(view.rootEl));
+      await until(() => view.pages.get(view.currentPage)?.canvasReady);
+      return item;
+    }
+    async function close(item) { await item.manager.flush(); await item.view.onClose(); item.view.cleanups.forEach(fn=>fn()); item.frame.remove(); }
+    window.closeHarnessReader = close;
+    const desktop = await reader(false);
+    desktop.view.restorePage(4); await desktop.view.restoreZoom(1.37); await desktop.manager.flush();
+    check('Desktop opens the annotated PDF and writes page 4 into a normal vault Markdown file', desktop.view.index.size===2880 && (await new ReadingPositionStore(vault).read(hash)).page===4);
+    const phone = await reader(true);
+    check('Independent phone restores desktop page 4 and keeps fit-to-width zoom', phone.view.currentPage===4 && phone.view.usesMobileFit() && phone.view.currentZoom()<1.37);
+    await until(() => phone.view.pages.get(4)?.markHost?.querySelector('canvas'));
+    const state = phone.view.pages.get(4);
+    const dense = state.markHost.querySelector('canvas');
+    phone.view.renderMarks(4);
+    check('Dense desktop annotations render on mobile and replaced overlay backing stores are zeroed', dense.width===0 && dense.height===0 && state.markHost.querySelector('canvas').width>0);
+    check('Mobile page and annotation canvases obey their pixel ceilings', state.canvasHost.querySelector('canvas').width*state.canvasHost.querySelector('canvas').height<=6000000 && state.markHost.querySelector('canvas').width*state.markHost.querySelector('canvas').height<=2000000);
+    const stableCanvas = state.canvasHost.querySelector('canvas');
+    const originalRender = state.page.render;
+    state.page.render = () => ({ promise: Promise.reject(Object.assign(Error('test cancellation'),{name:'RenderingCancelledException'})), cancel(){} });
+    state.renderedPixelRatio = 0;
+    const before = canvasHistory.length;
+    await phone.view.mountPage(state,true);
+    state.page.render = originalRender;
+    const candidate = canvasHistory[before];
+    check('Canceled canvas upgrade frees its detached replacement and keeps the readable page', candidate.width===0 && candidate.height===0 && stableCanvas.width>0);
+    phone.view.restorePage(7); await phone.manager.flush();
+    await desktop.view.restoreZoom(2); await desktop.manager.flush(); await desktop.manager.flush();
+    check('Phone page 7 survives repeated idle desktop flushes and a zoom change', (await new ReadingPositionStore(vault).read(hash)).page===7);
+    const reopened = await reader(false, desktop.data());
+    check('Desktop reopens on phone page 7 with its own 200% zoom', reopened.view.currentPage===7 && reopened.view.currentZoom()===2);
+    await delay(650); phone.manager.attach(phone.leaf); await delay(100);
+    reopened.view.restorePage(10); await reopened.manager.flush();
+    await delay(650); phone.manager.attach(phone.leaf); await until(()=>phone.view.currentPage===10);
+    check('Activating an idle phone reader picks up a page pulled after foregrounding', phone.view.currentPage===10 && phone.view.usesMobileFit());
+    phone.view.toggleInspector();
+    check('Dense annotation inspector mounts a bounded card window', phone.view.inspector.querySelectorAll('.lumen-annotation-card').length>0 && phone.view.inspector.querySelectorAll('.lumen-annotation-card').length<30);
+    phone.view.toggleInspector(); phone.view.setTheme('dark'); phone.view.setTheme('sepia'); phone.view.setTheme('light');
+    await phone.view.runSearch('Lumen mobile test');
+    check('PDF search still finds original selectable text after restoring desktop annotations', [...phone.view.searchHitsByPage.values()].reduce((sum,hits)=>sum+hits.length,0)===12);
+    check('Original saved annotations and source PDF bytes remain intact', files.get(snapshotPath)===JSON.stringify(records) && bytes.byteLength>0 && phone.view.index.get('desktop-0').note==='Saved note 0');
+    const renamed = await reader(true, {}, 'Renamed.pdf');
+    check('Shared position survives renaming the PDF', renamed.view.currentPage===10);
+    const zoomView = renamed.view;
+    const singleViewport = zoomView.scrollEl.getBoundingClientRect();
+    const singleX = singleViewport.left+singleViewport.width/2, singleY = singleViewport.top+240;
+    check('Single-finger mobile input passes through untouched', !touch(zoomView.scrollEl,'touchstart',[[1,singleX,singleY]]).defaultPrevented && !touch(zoomView.scrollEl,'touchmove',[[1,singleX,singleY+20]]).defaultPrevented);
+    // Appending a result above the readers moves their document coordinates.
+    // Measure only after that update, and keep reporting outside the gesture.
+    renamed.frame.scrollIntoView({block:'center',behavior:'instant'});
+    await new Promise(requestAnimationFrame);
+    const viewport = zoomView.scrollEl.getBoundingClientRect();
+    const x = viewport.left + viewport.width/2, y = viewport.top + 240;
+    const originalZoom = zoomView.currentZoom();
+    const originalAnchor = zoomView.captureZoomAnchor(x,y);
+    const originalLayer = zoomView.pages.get(originalAnchor.page).stage;
+    touch(zoomView.scrollEl,'touchstart',[[1,x-70,y],[2,x+70,y]]);
+    touch(zoomView.scrollEl,'touchmove',[[2,x+125,y+10],[1,x-85,y+10]]);
+    await new Promise(requestAnimationFrame);
+    const previewAnchor = zoomView.captureZoomAnchor(x+20,y+10);
+    const correctPreview = zoomView.rootEl.classList.contains('is-zooming') && zoomView.pages.get(originalAnchor.page).stage===originalLayer && previewAnchor.page===originalAnchor.page && Math.abs(previewAnchor.xRatio-originalAnchor.xRatio)<.002 && Math.abs(previewAnchor.yRatio-originalAnchor.yRatio)<.002;
+    window.harnessPinchDiagnostic = {originalAnchor,previewAnchor,zoom:zoomView.currentZoom(),correctPreview};
+    touch(zoomView.scrollEl,'touchend',[]);
+    check('Two-finger pinch previews the same existing layers around its moving midpoint', correctPreview);
+    const finalZoom = Math.round(originalZoom*1.5*20)/20;
+    await renamed.manager.flush();
+    check('Mobile pinch commits its final scale and persists manual zoom without changing annotations', zoomView.currentZoom()===finalZoom && !zoomView.usesMobileFit() && !zoomView.rootEl.classList.contains('is-zooming') && renamed.data().pdfViewState.pdfs['mobile:Renamed.pdf'].zoom===finalZoom && zoomView.index.size===2880);
+    zoomView.resetZoom();
+    check('Reset after mobile pinch restores fit-to-width', zoomView.usesMobileFit() && zoomView.currentZoom()===originalZoom);
+    // Keep the last phone visible for interactive QA; close other readers.
+    for (const item of active.filter(item=>item!==renamed)) await close(item);
+    active = [renamed];
+    window.harnessReaders = active;
+    window.harnessTouchTarget = () => {
+      const rect = renamed.view.scrollEl.getBoundingClientRect();
+      return {x:rect.left+rect.width/2,y:rect.top+240,zoom:renamed.view.currentZoom(),fit:renamed.view.usesMobileFit()};
+    };
+    window.harnessResult = { status:'passed', passed:checks.length, checks, annotationCount:2880, pageCount:12, browser: navigator.userAgent };
+    document.querySelector('#status').textContent = `${checks.length} browser integration checks passed. The remaining mobile reader is interactive.`;
+  } catch(error) {
+    window.harnessResult = {status:'failed',passed:checks.length,checks,error:error.stack};
+    element('li',{text:`FAIL · ${error.message}`,cls:'check-fail'},document.querySelector('#results'));
+    document.querySelector('#status').textContent='Browser integration check failed'; console.error(error);
+  } finally { document.querySelector('#run').disabled=false; }
+}
+document.querySelector('#run').addEventListener('click',run);
+</script></html>
