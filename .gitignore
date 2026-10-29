@@ -2,6 +2,8 @@ node_modules/
 dist/
 test/*
 !test/*.test.mjs
+!test/browser-mobile-harness.mjs
+!test/browser-mobile-harness.html
 tmp/
 *.log
 .DS_Store

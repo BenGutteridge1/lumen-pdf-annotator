@@ -1287,7 +1287,7 @@
   transition: none;
 }
 
-/* Scale every existing page layer together while a desktop pinch is active.
+/* Scale every existing page layer together while a pinch is active.
  * Shells use the live zoom for scrolling/anchoring; PDF.js paints once it ends. */
 .lumen-reader.is-zooming .lumen-page-stage {
   width: calc(var(--lumen-page-width) * var(--lumen-render-zoom));

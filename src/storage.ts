@@ -134,32 +134,55 @@ function schedulePdfBackup(vault: Vault, sourcePath: string, backupPath: string)
 async function readSnapshot(markdown: string): Promise<PdfAnnotation[]> {
   const match = markdown.match(/```json lumen-pdf-data\n([\s\S]*?)\n```/);
   if (!match) return [];
-  try {
-    const value: unknown = JSON.parse(match[1]);
-    if (!Array.isArray(value)) return [];
-    const annotations: PdfAnnotation[] = [];
-    for (let index = 0; index < value.length; index++) {
-      const annotation = normalizeAnnotation(value[index]);
-      if (annotation) annotations.push(annotation);
-      if (index > 0 && index % 1_000 === 0) await yieldToHost();
-    }
-    return annotations;
-  } catch {
-    return [];
-  }
+  return await readJsonSnapshot(match[1]) ?? [];
 }
 
 async function readJsonSnapshot(json: string): Promise<PdfAnnotation[] | null> {
+  // Parse one top-level array member at a time. JSON.parse(the whole file)
+  // retained a second complete object/rectangle graph while normalization
+  // and index creation ran, which can exhaust a mobile WebView on large sets.
   try {
-    const value: unknown = JSON.parse(json);
-    if (!Array.isArray(value)) return null;
     const annotations: PdfAnnotation[] = [];
-    for (let index = 0; index < value.length; index++) {
-      const annotation = normalizeAnnotation(value[index]);
-      if (annotation) annotations.push(annotation);
-      if (index > 0 && index % 1_000 === 0) await yieldToHost();
+    let offset = 0;
+    const skipSpace = () => { while (offset < json.length && /[\t\n\r ]/.test(json[offset])) offset++; };
+    skipSpace();
+    if (json[offset++] !== "[") return null;
+    skipSpace();
+    if (json[offset] === "]") {
+      offset++; skipSpace();
+      return offset === json.length ? annotations : null;
     }
-    return annotations;
+    let records = 0;
+    let nextYield = offset + 262_144;
+    while (offset < json.length) {
+      const start = offset;
+      let depth = 0;
+      let inString = false;
+      let escaped = false;
+      for (; offset < json.length; offset++) {
+        const character = json[offset];
+        if (inString) {
+          if (escaped) escaped = false;
+          else if (character === "\\") escaped = true;
+          else if (character === '"') inString = false;
+        } else if (character === '"') inString = true;
+        else if (depth === 0 && (character === "," || character === "]")) break;
+        else if (character === "{" || character === "[") depth++;
+        else if (character === "}" || character === "]") depth--;
+        if (offset >= nextYield) {
+          await yieldToHost();
+          nextYield = offset + 262_144;
+        }
+      }
+      const annotation = normalizeAnnotation(JSON.parse(json.slice(start, offset)));
+      if (annotation) annotations.push(annotation);
+      if (++records % 250 === 0) await yieldToHost();
+      const separator = json[offset++];
+      skipSpace();
+      if (separator === "]") return offset === json.length ? annotations : null;
+      if (separator !== "," || json[offset] === "]") return null;
+    }
+    return null;
   } catch {
     return null;
   }
@@ -314,17 +337,23 @@ export class AnnotationRepository {
       if (item > 0 && item % 1_000 === 0) await yieldToHost();
     }
     if (await this.vault.adapter.exists(this.journalPath)) {
-      const lines = (await this.vault.adapter.read(this.journalPath)).split("\n");
-      for (let lineNumber = 0; lineNumber < lines.length; lineNumber++) {
-        const line = lines[lineNumber];
-        if (!line.trim()) continue;
-        try {
-          const mutation = normalizeMutation(JSON.parse(line));
-          if (!mutation) continue;
-          index.apply(mutation);
-          this.dirty = true;
-        } catch { /* retain recoverable lines */ }
-        if (lineNumber > 0 && lineNumber % 1_000 === 0) await yieldToHost();
+      const journal = await this.vault.adapter.read(this.journalPath);
+      let offset = 0;
+      let lineNumber = 0;
+      while (offset < journal.length) {
+        const end = journal.indexOf("\n", offset);
+        const line = journal.slice(offset, end < 0 ? journal.length : end);
+        offset = end < 0 ? journal.length : end + 1;
+        if (line.trim()) {
+          try {
+            const mutation = normalizeMutation(JSON.parse(line));
+            if (mutation) {
+              index.apply(mutation);
+              this.dirty = true;
+            }
+          } catch { /* retain recoverable lines */ }
+        }
+        if (++lineNumber % 250 === 0) await yieldToHost();
       }
     }
     return index;

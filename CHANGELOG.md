@@ -2,6 +2,13 @@
 
 All notable changes to Lumen PDF Annotator are documented here.
 
+## 1.0.27 — 2026-10-29
+
+- Share the last-read PDF page between desktop and mobile through ordinary Markdown files in `Lumen PDF state/`, so vault Git sync can carry reading progress without syncing plugin settings. Keep zoom and mobile fit-to-width preferences separate, migrate the newest existing page, and refresh an idle reader after synced files arrive.
+- Prevent a stale tab, zoom-only change, or background flush from replacing a newer page read on another device. Content-based state continues to work after a PDF is renamed or moved.
+- Reduce mobile annotation-open memory peaks by restoring snapshots one record at a time, replaying journals without splitting the whole file, and finishing annotation restore before PDF parsing begins. Release replaced or canceled PDF and dense-annotation canvas backing stores immediately.
+- Add two-finger mobile PDF pinch zoom from 25–400%, anchored to the moving finger midpoint. Existing page layers preview the gesture together, then nearby pages render once at the final scale; one-finger scrolling, text selection, and fit-to-width reset remain available.
+
 ## 1.0.26 — 2026-10-23
 
 - Remove the stray vertical selection strip at the PDF page margin by keeping PDF.js line-break elements transparent during text selection. Selected text and saved annotation geometry remain unchanged on desktop and mobile.
