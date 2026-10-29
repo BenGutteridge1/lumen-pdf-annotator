@@ -641,7 +641,7 @@ test('precise desktop zoom saves from a gesture without scrolling, restores, and
   view.zoomOut();
   assert.equal(view.currentZoom(), 1.25);
   view.restorePage = page => { view.pageInput.value = String(page); };
-  await manager.restore(view, rootEl, { zoom: 1.37, page: 4, updatedAt: 1 });
+  await manager.restore(view, rootEl, { zoom: 1.37 }, { page: 4, updatedAt: 1 });
   assert.equal(view.currentZoom(), 1.37);
   assert.equal(view.pageInput.value, '4');
   view.zoomIn();
@@ -676,10 +676,10 @@ function stateVault() {
   } };
 }
 
-async function stateReader(vault, mobile = false, initialData = {}, path = 'fixture.pdf') {
+async function stateReader(vault, mobile = false, initialData = {}, path = 'fixture.pdf', hash = 'a'.repeat(64)) {
   const fixture = renderer({ mobile, count: 20, ViewClass: mobile ? MobileStatePdfView : StatePdfView });
   fixture.view.file.path = path;
-  fixture.view.getDocumentHash = () => 'a'.repeat(64);
+  fixture.view.getDocumentHash = () => hash;
   let data = initialData;
   const Manager = mobile ? MobileStateManager : PdfViewStateManager;
   const manager = new Manager({ app: { vault }, loadData: async () => data }, async state => { data = { pdfViewState: state }; });
@@ -689,17 +689,17 @@ async function stateReader(vault, mobile = false, initialData = {}, path = 'fixt
   return { ...fixture, manager, data: () => data };
 }
 
-test('Git-synced vault state shares page in both directions, keeps device zoom and survives PDF renames', async () => {
+test('hidden per-PDF bundle JSON shares pages in both directions, keeps device zoom and survives PDF renames', async () => {
   const vault = stateVault();
   const desktop = await stateReader(vault);
   await desktop.view.restoreZoom(1.37);
   desktop.view.restorePage(7);
   await desktop.manager.flush();
-  const positionPath = [...vault.files.keys()].find(path => path.endsWith('.md'));
-  assert.ok(positionPath.startsWith('Lumen PDF state/'));
-  assert.match(vault.files.get(positionPath), /lumen-page: 7/);
+  const positionPath = `.lumen-pdf/bundles/sha256/${'a'.repeat(64)}/reading-position.json`;
+  assert.deepEqual([...vault.files.keys()], [positionPath]);
+  assert.equal(JSON.parse(vault.files.get(positionPath)).position.page, 7);
 
-  // The phone has its own plugin settings; only ordinary vault files sync.
+  // The phone has its own plugin settings; the hidden bundle file syncs.
   const mobile = await stateReader(vault, true);
   assert.equal(mobile.view.pageInput.value, '7');
   assert.equal(mobile.view.usesMobileFit(), true);
@@ -720,6 +720,28 @@ test('Git-synced vault state shares page in both directions, keeps device zoom a
   const renamed = await stateReader(vault, true, {}, 'renamed.pdf');
   assert.equal(renamed.view.pageInput.value, '11');
   assert.equal(renamed.view.usesMobileFit(), true);
+});
+
+test('future PDFs automatically receive independent hidden reading-position JSON files', async () => {
+  const vault = stateVault();
+  const firstHash = 'a'.repeat(64);
+  const secondHash = 'b'.repeat(64);
+  const first = await stateReader(vault, false, {}, 'first.pdf', firstHash);
+  first.view.restorePage(3);
+  await first.manager.flush();
+  const second = await stateReader(vault, false, {}, 'second.pdf', secondHash);
+  second.view.restorePage(9);
+  await second.manager.flush();
+
+  const firstPath = `.lumen-pdf/bundles/sha256/${firstHash}/reading-position.json`;
+  const secondPath = `.lumen-pdf/bundles/sha256/${secondHash}/reading-position.json`;
+  assert.equal(JSON.parse(vault.files.get(firstPath)).position.page, 3);
+  assert.equal(JSON.parse(vault.files.get(secondPath)).position.page, 9);
+  assert.equal(vault.files.size, 2);
+  const reopenedFirst = await stateReader(vault, true, {}, 'first.pdf', firstHash);
+  const reopenedSecond = await stateReader(vault, true, {}, 'second.pdf', secondHash);
+  assert.equal(reopenedFirst.view.pageInput.value, '3');
+  assert.equal(reopenedSecond.view.pageInput.value, '9');
 });
 
 test('activating an idle reader refreshes a synced page while active scrolling and unsaved navigation are protected', async () => {
@@ -747,16 +769,20 @@ test('activating an idle reader refreshes a synced page while active scrolling a
   assert.equal(phone.view.pageInput.value, '7');
 });
 
-test('old platform records migrate the newest page without inheriting the other platform zoom', async () => {
+test('old platform records and 1.0.27 Markdown positions migrate into bundle JSON without mixing zoom', async () => {
   const vault = stateVault();
+  const oldMarkdownPath = `Lumen PDF state/${'a'.repeat(64)}.md`;
+  vault.files.set(oldMarkdownPath, '---\nlumen-page: 10\nlumen-updated-at: 30\n---\n');
   const desktop = await stateReader(vault, false, { pdfViewState: { version: 1, pdfs: {
     'fixture.pdf': { page: 3, zoom: 1.37, updatedAt: 10 },
     'mobile:fixture.pdf': { page: 8, zoom: .75, updatedAt: 20, mobileFit: false },
   } } });
-  assert.equal(desktop.view.pageInput.value, '8');
+  assert.equal(desktop.view.pageInput.value, '10');
   assert.equal(desktop.view.currentZoom(), 1.37);
   await desktop.manager.flush();
-  assert.match([...vault.files.values()].join('\n'), /lumen-page: 8/);
+  assert.equal(JSON.parse(vault.files.get(`.lumen-pdf/bundles/sha256/${'a'.repeat(64)}/reading-position.json`)).position.page, 10);
+  assert.equal(vault.files.has(oldMarkdownPath), true);
+  assert.equal(vault.files.size, 2);
 });
 
 test('dense annotation repaint releases its previous canvas before detaching it', () => {

@@ -1,6 +1,6 @@
 {
   "name": "lumen-pdf-annotator",
-  "version": "1.0.27",
+  "version": "1.0.28",
   "private": true,
   "description": "Clean implementation of a performance-first PDF annotator for Obsidian.",
   "repository": {

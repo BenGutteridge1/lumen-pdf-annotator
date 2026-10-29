@@ -72,7 +72,7 @@ The append-only JSONL journal protects recent changes between checkpoints, while
 
 Everything stays in the vault: no account, telemetry, remote processing, CDN scripts, or dynamic code loading.
 
-Reading progress is stored separately in `Lumen PDF state/<document-hash>.md`. Include this ordinary vault folder in GitSync, Obsidian Sync, or your other vault sync to resume the same PDF page on desktop and mobile. The newest recorded page wins; keep device clocks accurate and finish syncing before moving between devices. Plugin settings do not need to sync for page sharing. Zoom and mobile fit-to-width preferences stay separate for desktop and mobile. Lumen checks for a newer page when opening or activating a PDF, returning to the app, or receiving a state-file sync update, and avoids moving a reader with active scrolling or unsaved navigation. Annotation bundles still need their `.lumen-pdf/` folder included in sync if you want the same annotations on both devices.
+Lumen automatically stores each PDF's shared page in `reading-position.json` beside its annotation bundle under `.lumen-pdf/`. This keeps sync state hidden with the PDF's annotations; no separate reading-state folder or Markdown notes are created. Include `.lumen-pdf/` in GitSync on both devices. Keep device clocks accurate and finish syncing before moving between devices. Zoom and mobile fit-to-width preferences remain separate on each device. Lumen checks for newer pages when opening or activating a PDF, returning to the app, or receiving a state-file sync update, and avoids moving a reader with active scrolling or unsaved navigation. On first open after upgrading from 1.0.27, Lumen imports the newest saved page and then uses the bundle JSON file.
 
 ## Install
 

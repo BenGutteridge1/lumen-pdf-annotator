@@ -94,7 +94,7 @@ async function run() {
     window.closeHarnessReader = close;
     const desktop = await reader(false);
     desktop.view.restorePage(4); await desktop.view.restoreZoom(1.37); await desktop.manager.flush();
-    check('Desktop opens the annotated PDF and writes page 4 into a normal vault Markdown file', desktop.view.index.size===2880 && (await new ReadingPositionStore(vault).read(hash)).page===4);
+    check('Desktop opens the annotated PDF and writes page 4 into its hidden bundle JSON', desktop.view.index.size===2880 && (await new ReadingPositionStore(vault).read(hash)).page===4);
     const phone = await reader(true);
     check('Independent phone restores desktop page 4 and keeps fit-to-width zoom', phone.view.currentPage===4 && phone.view.usesMobileFit() && phone.view.currentZoom()<1.37);
     await until(() => phone.view.pages.get(4)?.markHost?.querySelector('canvas'));

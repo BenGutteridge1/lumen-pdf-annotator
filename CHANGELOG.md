@@ -2,6 +2,11 @@
 
 All notable changes to Lumen PDF Annotator are documented here.
 
+## 1.0.28 — 2026-10-29
+
+- Store each PDF's shared page in `reading-position.json` beside its annotation bundle under `.lumen-pdf/`. No separate reading-state folder or Markdown notes are created; GitSync can carry this hidden JSON with the existing bundle. Desktop and mobile zoom preferences remain device-specific.
+- Import the newest page from 1.0.27's existing state files the first time each PDF is opened, then save future progress beside that PDF's bundle.
+
 ## 1.0.27 — 2026-10-29
 
 - Share the last-read PDF page between desktop and mobile through ordinary Markdown files in `Lumen PDF state/`, so vault Git sync can carry reading progress without syncing plugin settings. Keep zoom and mobile fit-to-width preferences separate, migrate the newest existing page, and refresh an idle reader after synced files arrive.
