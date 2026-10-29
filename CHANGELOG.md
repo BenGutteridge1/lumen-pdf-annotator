@@ -2,6 +2,11 @@
 
 All notable changes to Lumen PDF Annotator are documented here.
 
+## 1.0.29 — 2026-10-29
+
+- Store each device's reading position in its own `reading-position.<device-id>.json` file inside each PDF bundle. Devices read the newest synced page while writing separate files, preventing Git merge conflicts on the shared position file. Keep reading 1.0.28's shared JSON and older Markdown/plugin-state positions for migration.
+- Keep zoom preferences in device-local storage and migrate existing zoom settings from plugin data. Page and zoom changes no longer rewrite `data.json`.
+
 ## 1.0.28 — 2026-10-29
 
 - Store each PDF's shared page in `reading-position.json` beside its annotation bundle under `.lumen-pdf/`. No separate reading-state folder or Markdown notes are created; GitSync can carry this hidden JSON with the existing bundle. Desktop and mobile zoom preferences remain device-specific.

@@ -69,7 +69,9 @@ async function run() {
     const bytes = pdfBytes();
     const hash = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)), n => n.toString(16).padStart(2,'0')).join('');
     const files = new Map();
-    const vault = { adapter: { exists: async path => files.has(path), read: async path => { if (!files.has(path)) throw Error(`Missing ${path}`); return files.get(path); }, write: async (path,text) => files.set(path,text), mkdir: async path => files.set(path,''), append: async (path,text) => files.set(path,(files.get(path)||'')+text) }, readBinary: async () => bytes.slice(0), getName: () => 'Synthetic test vault' };
+    const vault = { adapter: { exists: async path => files.has(path), read: async path => { if (!files.has(path)) throw Error(`Missing ${path}`); return files.get(path); }, write: async (path,text) => files.set(path,text), mkdir: async path => files.set(path,''), append: async (path,text) => files.set(path,(files.get(path)||'')+text), list: async path => ({files:[...files.keys()].filter(file=>file.startsWith(`${path}/`)),folders:[]}) }, readBinary: async () => bytes.slice(0), getName: () => 'Synthetic test vault' };
+    const localZoom = {desktop:new Map(),mobile:new Map()};
+    const localStorageFor = mobile => ({getItem:key=>localZoom[mobile?'mobile':'desktop'].get(key)??null,setItem:(key,value)=>localZoom[mobile?'mobile':'desktop'].set(key,value)});
     const records = Array.from({length:2880}, (_, i) => ({ id:`desktop-${i}`,kind:i%19===0?'page-note':'text',page:Math.floor(i/240)+1,rects:[{x:.08+(i%5)*.17,y:.16+Math.floor((i%240)/5)*.014,width:.14,height:.009}],quote:`Saved desktop quote ${i}: punctuation [ ] { }, " \\`,note:`Saved note ${i}`,tags:['test'],color:['#ffd12d','#83cb67','#6f9fe8'][i%3],style:['highlight','underline','dashed','dotted','strike','box','comment'][i%7],createdAt:i+1,updatedAt:i+1 }));
     const snapshotPath = `.lumen-pdf/bundles/sha256/${hash}/annotations.snapshot.json`;
     files.set(snapshotPath, JSON.stringify(records));
@@ -80,7 +82,7 @@ async function run() {
       const app = { vault, scope: {}, workspace: { getLeavesOfType: () => active.map(item => item.leaf) } };
       const leaf = { app, contentEl, containerEl: frame };
       let data = pluginData;
-      const manager = new PdfViewStateManager({ app, loadData: async () => data }, async state => { data = {pdfViewState:state}; });
+      const manager = new PdfViewStateManager({ app, loadData: async () => data }, localStorageFor(mobile));
       await manager.load();
       const view = new LumenPdfView(leaf, 'light', undefined, 'PDF annotations', false, () => manager.attach(leaf));
       leaf.view = view; view.file = new TFile(path, bytes.byteLength);
@@ -94,7 +96,7 @@ async function run() {
     window.closeHarnessReader = close;
     const desktop = await reader(false);
     desktop.view.restorePage(4); await desktop.view.restoreZoom(1.37); await desktop.manager.flush();
-    check('Desktop opens the annotated PDF and writes page 4 into its hidden bundle JSON', desktop.view.index.size===2880 && (await new ReadingPositionStore(vault).read(hash)).page===4);
+    check('Desktop opens the annotated PDF and writes page 4 into its hidden bundle JSON', desktop.view.index.size===2880 && (await new ReadingPositionStore(vault,desktop.manager.deviceId).read(hash)).page===4);
     const phone = await reader(true);
     check('Independent phone restores desktop page 4 and keeps fit-to-width zoom', phone.view.currentPage===4 && phone.view.usesMobileFit() && phone.view.currentZoom()<1.37);
     await until(() => phone.view.pages.get(4)?.markHost?.querySelector('canvas'));
@@ -114,7 +116,7 @@ async function run() {
     check('Canceled canvas upgrade frees its detached replacement and keeps the readable page', candidate.width===0 && candidate.height===0 && stableCanvas.width>0);
     phone.view.restorePage(7); await phone.manager.flush();
     await desktop.view.restoreZoom(2); await desktop.manager.flush(); await desktop.manager.flush();
-    check('Phone page 7 survives repeated idle desktop flushes and a zoom change', (await new ReadingPositionStore(vault).read(hash)).page===7);
+    check('Phone page 7 survives repeated idle desktop flushes and a zoom change', (await new ReadingPositionStore(vault,phone.manager.deviceId).read(hash)).page===7);
     const reopened = await reader(false, desktop.data());
     check('Desktop reopens on phone page 7 with its own 200% zoom', reopened.view.currentPage===7 && reopened.view.currentZoom()===2);
     await delay(650); phone.manager.attach(phone.leaf); await delay(100);
@@ -152,7 +154,7 @@ async function run() {
     check('Two-finger pinch previews the same existing layers around its moving midpoint', correctPreview);
     const finalZoom = Math.round(originalZoom*1.5*20)/20;
     await renamed.manager.flush();
-    check('Mobile pinch commits its final scale and persists manual zoom without changing annotations', zoomView.currentZoom()===finalZoom && !zoomView.usesMobileFit() && !zoomView.rootEl.classList.contains('is-zooming') && renamed.data().pdfViewState.pdfs['mobile:Renamed.pdf'].zoom===finalZoom && zoomView.index.size===2880);
+    check('Mobile pinch commits its final scale and persists manual zoom without changing annotations', zoomView.currentZoom()===finalZoom && !zoomView.usesMobileFit() && !zoomView.rootEl.classList.contains('is-zooming') && renamed.manager.data.pdfs['mobile:Renamed.pdf'].zoom===finalZoom && zoomView.index.size===2880);
     zoomView.resetZoom();
     check('Reset after mobile pinch restores fit-to-width', zoomView.usesMobileFit() && zoomView.currentZoom()===originalZoom);
     // Keep the last phone visible for interactive QA; close other readers.

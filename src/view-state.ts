@@ -8,20 +8,59 @@ interface PdfZoomState {
 }
 
 interface PdfViewStateData {
-  version: 2;
+  version: 1;
   pdfs: Record<string, PdfZoomState>;
 }
 
 interface PluginDataWithViewState {
-  pdfViewState?: Partial<PdfViewStateData>;
+  pdfViewState?: { pdfs?: Record<string, unknown> };
   [key: string]: unknown;
+}
+
+interface LocalStateStorage {
+  getItem(key: string): string | null;
+  setItem(key: string, value: string): void;
 }
 
 const SAVE_DELAY_MS = 450;
 const MAX_ENTRIES = 2000;
+const LOCAL_STATE_KEY = "lumen-pdf-annotator:pdf-view-state:v1";
+const DEVICE_ID_KEY = "lumen-pdf-annotator:device-id:v1";
+
+function browserLocalStorage(): LocalStateStorage | null {
+  try {
+    const storage = typeof window === "undefined" ? null : window.localStorage;
+    return storage && typeof storage.getItem === "function" && typeof storage.setItem === "function" ? storage : null;
+  } catch {
+    return null;
+  }
+}
+
+function newDeviceId(): string {
+  try {
+    return crypto.randomUUID().replace(/[^a-f0-9-]/gi, "").toLowerCase();
+  } catch {
+    return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  }
+}
+
+function getDeviceId(storage: LocalStateStorage | null): string {
+  if (storage) {
+    try {
+      const existing = storage.getItem(DEVICE_ID_KEY);
+      if (existing && /^[a-z0-9-]{1,64}$/.test(existing)) return existing;
+      const created = newDeviceId();
+      storage.setItem(DEVICE_ID_KEY, created);
+      return created;
+    } catch {
+      // A transient local-storage failure should not stop opening a PDF.
+    }
+  }
+  return newDeviceId();
+}
 
 function zoomKey(view: LumenPdfView, path: string): string {
-  // Preserve independent device zoom preferences in local plugin settings.
+  // Preserve independent zoom preferences in this device's local storage.
   return view.isMobileView() ? `mobile:${path}` : path;
 }
 
@@ -30,9 +69,10 @@ function zoomKey(view: LumenPdfView, path: string): string {
  * PDF renderer or annotation journal, so normal reading remains unaffected.
  */
 export class PdfViewStateManager {
-  private data: PdfViewStateData = { version: 2, pdfs: {} };
+  private data: PdfViewStateData = { version: 1, pdfs: {} };
   private saveTimer: number | null = null;
   private saveChain: Promise<void> = Promise.resolve();
+  private localStateDirty = false;
   private readonly attached = new WeakSet<HTMLElement>();
   private readonly pendingRestores = new WeakMap<HTMLElement, () => void>();
   private readonly activeCaptures = new Map<HTMLElement, () => void>();
@@ -44,12 +84,16 @@ export class PdfViewStateManager {
   private readonly pendingPositions = new Map<string, ReadingPosition>();
   private readonly legacyPositions = new Map<string, ReadingPosition>();
   private readonly positionStore: ReadingPositionStore | null;
+  private readonly localStorage: LocalStateStorage | null;
+  private readonly localStateKey: string;
+  readonly deviceId: string;
 
-  constructor(
-    private readonly plugin: Plugin,
-    private readonly persist: (state: PdfViewStateData) => Promise<void>,
-  ) {
-    this.positionStore = plugin.app?.vault ? new ReadingPositionStore(plugin.app.vault) : null;
+  constructor(private readonly plugin: Plugin, localStorage?: LocalStateStorage | null) {
+    this.localStorage = localStorage === undefined ? browserLocalStorage() : localStorage;
+    this.deviceId = getDeviceId(this.localStorage);
+    this.positionStore = plugin.app?.vault ? new ReadingPositionStore(plugin.app.vault, this.deviceId) : null;
+    const vaultName = plugin.app?.vault?.getName?.() ?? "default";
+    this.localStateKey = `${LOCAL_STATE_KEY}:${encodeURIComponent(vaultName)}`;
   }
 
   async load(): Promise<void> {
@@ -63,14 +107,52 @@ export class PdfViewStateManager {
     for (const [key, raw] of Object.entries(pdfs)) {
       if (!raw || typeof raw !== "object") continue;
       const state = raw as Partial<PdfZoomState & ReadingPosition>;
-      if (Number.isFinite(state.zoom)) zooms[key] = { zoom: state.zoom!, mobileFit: state.mobileFit === true || undefined };
+      if (Number.isFinite(state.zoom)) zooms[key] = { zoom: state.zoom!, mobileFit: typeof state.mobileFit === "boolean" ? state.mobileFit : undefined };
       const position = readingPosition(state);
       if (position) {
         const path = key.startsWith("mobile:") ? key.slice("mobile:".length) : key;
         this.legacyPositions.set(path, newerPosition(this.legacyPositions.get(path) ?? null, position)!);
       }
     }
-    this.data = { version: 2, pdfs: zooms };
+    const localData = this.readLocalState();
+    this.data = localData ?? { version: 1, pdfs: zooms };
+    // One-time import from older plugin data. Future zoom writes stay on this
+    // device, so GitSync never has to merge desktop and mobile preferences.
+    if (!localData && Object.keys(zooms).length) this.writeLocalState();
+  }
+
+  private readLocalState(): PdfViewStateData | null {
+    if (!this.localStorage) return null;
+    try {
+      const text = this.localStorage.getItem(this.localStateKey);
+      if (!text) return null;
+      const value: unknown = JSON.parse(text);
+      if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+      const stored = value as Partial<PdfViewStateData>;
+      if (stored.version !== 1 || !stored.pdfs || typeof stored.pdfs !== "object" || Array.isArray(stored.pdfs)) return null;
+      const pdfs: Record<string, PdfZoomState> = {};
+      for (const [key, raw] of Object.entries(stored.pdfs)) {
+        if (!raw || typeof raw !== "object") continue;
+        const state = raw as Partial<PdfZoomState>;
+        if (!Number.isFinite(state.zoom)) continue;
+        pdfs[key] = { zoom: state.zoom!, mobileFit: typeof state.mobileFit === "boolean" ? state.mobileFit : undefined };
+      }
+      return { version: 1, pdfs };
+    } catch (error) {
+      console.warn("Lumen could not read local PDF zoom settings", error);
+      return null;
+    }
+  }
+
+  private writeLocalState(): boolean {
+    if (!this.localStorage) return false;
+    try {
+      this.localStorage.setItem(this.localStateKey, JSON.stringify({ version: 1, pdfs: this.data.pdfs }));
+      return true;
+    } catch (error) {
+      console.warn("Lumen could not save local PDF zoom settings", error);
+      return false;
+    }
   }
 
   attach(leaf: WorkspaceLeaf): void {
@@ -98,21 +180,29 @@ export class PdfViewStateManager {
     if (hash) this.documentHashes.set(root, hash);
     let positionLoaded = false;
     let timer = 0;
+    let persistZoomOnCapture = false;
     let listening = false;
     let disposed = false;
     let restoring = false;
     let resizeObserver: ResizeObserver | null = null;
-    const captureLater = () => {
+    const scheduleCapture = (persistZoom: boolean) => {
+      if (persistZoom) persistZoomOnCapture = true;
       window.clearTimeout(timer);
       timer = window.setTimeout(() => {
         timer = 0;
-        this.capture(view, root, path);
+        const shouldPersistZoom = persistZoomOnCapture;
+        persistZoomOnCapture = false;
+        this.capture(view, root, path, false, shouldPersistZoom);
       }, SAVE_DELAY_MS);
     };
+    const captureLater = () => scheduleCapture(false);
+    const captureZoomLater = () => scheduleCapture(true);
     const captureNow = (allowDetached = false) => {
       window.clearTimeout(timer);
       timer = 0;
-      this.capture(view, root, path, allowDetached);
+      const shouldPersistZoom = persistZoomOnCapture;
+      persistZoomOnCapture = false;
+      this.capture(view, root, path, allowDetached, shouldPersistZoom);
     };
     const startListening = () => {
       if (disposed || listening) return;
@@ -124,8 +214,8 @@ export class PdfViewStateManager {
       this.pageTimes.set(root, savedPosition?.updatedAt ?? 0);
       scroll.addEventListener("scroll", captureLater, { passive: true });
       pageInput?.addEventListener("change", captureLater);
-      zoomButtons.forEach(button => button.addEventListener("click", captureLater));
-      root.addEventListener("lumen-zoom-change", captureLater);
+      zoomButtons.forEach(button => button.addEventListener("click", captureZoomLater));
+      root.addEventListener("lumen-zoom-change", captureZoomLater);
       this.activeCaptures.set(root, captureNow);
       let refreshing = false;
       this.refreshPositions.set(root, () => {
@@ -163,8 +253,8 @@ export class PdfViewStateManager {
       if (listening) captureNow(true);
       scroll.removeEventListener("scroll", captureLater);
       pageInput?.removeEventListener("change", captureLater);
-      zoomButtons.forEach(button => button.removeEventListener("click", captureLater));
-      root.removeEventListener("lumen-zoom-change", captureLater);
+      zoomButtons.forEach(button => button.removeEventListener("click", captureZoomLater));
+      root.removeEventListener("lumen-zoom-change", captureZoomLater);
       resizeObserver?.disconnect();
       mutationObserver?.disconnect();
       this.pendingRestores.delete(root);
@@ -185,20 +275,22 @@ export class PdfViewStateManager {
           let storedPosition: ReadingPosition | null = null;
           let sidecarPosition: ReadingPosition | null = null;
           if (hash && this.positionStore) {
-            try {
-              storedPosition = await this.positionStore.read(hash);
-              if (!storedPosition) sidecarPosition = await this.positionStore.readLegacy(hash);
-            }
+            try { storedPosition = await this.positionStore.read(hash); }
             catch (error) { console.warn("Lumen could not read the shared PDF page", error); }
-            const position = newerPosition(storedPosition, newerPosition(sidecarPosition, legacyPosition));
-            if (position) {
-              this.positions.set(hash, position);
-              if (!storedPosition || position.updatedAt > storedPosition.updatedAt) {
-                this.pendingPositions.set(hash, position);
-                this.scheduleSave();
-              }
+            if (!storedPosition) {
+              try { sidecarPosition = await this.positionStore.readLegacy(hash); }
+              catch (error) { console.warn("Lumen could not read the legacy shared PDF page", error); }
             }
-            savedPosition = newerPosition(storedPosition, newerPosition(sidecarPosition, legacyPosition));
+            // The bundle JSON is canonical once present. Old plugin settings
+            // and Markdown sidecars are migration sources only when it is absent.
+            savedPosition = storedPosition ?? newerPosition(sidecarPosition, legacyPosition);
+            if (savedPosition && !storedPosition) {
+              this.positions.set(hash, savedPosition);
+              this.pendingPositions.set(hash, savedPosition);
+              this.scheduleSave();
+            } else if (storedPosition) {
+              this.positions.set(hash, storedPosition);
+            }
           } else {
             savedPosition = legacyPosition;
           }
@@ -241,7 +333,7 @@ export class PdfViewStateManager {
     return true;
   }
 
-  private capture(view: LumenPdfView, root: HTMLElement, path: string, allowDetached = false): void {
+  private capture(view: LumenPdfView, root: HTMLElement, path: string, allowDetached = false, persistZoom = false): void {
     const scroll = root.querySelector<HTMLElement>(".lumen-scroll");
     if (!allowDetached && (!root.isConnected || !root.clientWidth || !scroll?.clientHeight
       || root.ownerDocument.defaultView?.getComputedStyle(root).visibility === "hidden")) return;
@@ -260,16 +352,25 @@ export class PdfViewStateManager {
       this.positions.set(hash, next);
       this.pendingPositions.set(hash, next);
     }
-    this.data.pdfs[key] = {
+    const nextZoom: PdfZoomState = {
       zoom: Math.max(view.minimumZoom(), Math.min(4, zoom)),
-      mobileFit: view.usesMobileFit() || undefined,
+      mobileFit: view.usesMobileFit(),
     };
-    const updatedZoom = this.data.pdfs[key];
-    delete this.data.pdfs[key];
-    this.data.pdfs[key] = updatedZoom;
-    const entries = Object.entries(this.data.pdfs);
-    if (entries.length > MAX_ENTRIES) this.data.pdfs = Object.fromEntries(entries.slice(-MAX_ENTRIES));
-    this.scheduleSave();
+    const previousZoom = this.data.pdfs[key];
+    const changedZoom = persistZoom && (!previousZoom
+      || Math.abs(previousZoom.zoom - nextZoom.zoom) >= 0.001
+      || Boolean(previousZoom.mobileFit) !== nextZoom.mobileFit);
+    if (changedZoom) {
+      this.data.pdfs[key] = nextZoom;
+      const updatedZoom = this.data.pdfs[key];
+      delete this.data.pdfs[key];
+      this.data.pdfs[key] = updatedZoom;
+      const entries = Object.entries(this.data.pdfs);
+      if (entries.length > MAX_ENTRIES) this.data.pdfs = Object.fromEntries(entries.slice(-MAX_ENTRIES));
+      this.localStateDirty = true;
+    }
+    if (changedPage && hash) this.scheduleSave();
+    else if (changedZoom) this.scheduleSave();
   }
 
   private scheduleSave(): void {
@@ -288,7 +389,7 @@ export class PdfViewStateManager {
       this.positions.set(hash, newerPosition(this.positions.get(hash) ?? null, stored)!);
       if (this.pendingPositions.get(hash) === position) this.pendingPositions.delete(hash);
     }
-    await this.persist({ version: 2, pdfs: { ...this.data.pdfs } });
+    if (this.localStateDirty && this.writeLocalState()) this.localStateDirty = false;
   }
 
   async flush(): Promise<void> {
