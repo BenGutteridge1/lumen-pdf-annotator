@@ -10,16 +10,26 @@ interface SharedReadingState {
   position: ReadingPosition;
 }
 
+const HASH_PATTERN = /^[a-f0-9]{64}$/;
+const DEVICE_PATTERN = /^[a-z0-9-]{1,64}$/;
+
 // Each PDF bundle already has a hidden directory. Keep its reading position
-// beside annotations so vault sync carries both without a separate folder or
-// Markdown note. Plugin data.json is excluded by common Git sync defaults.
-export function sharedReadingStatePath(hash: string): string {
-  if (!/^[a-f0-9]{64}$/.test(hash)) throw new Error("Invalid PDF identity");
+// beside annotations. A file per device lets Git merge page updates without
+// making two devices edit the same JSON. The old shared file remains readable
+// for migration but is never written again.
+export function sharedReadingStatePath(hash: string, deviceId: string): string {
+  if (!HASH_PATTERN.test(hash)) throw new Error("Invalid PDF identity");
+  if (!DEVICE_PATTERN.test(deviceId)) throw new Error("Invalid device identity");
+  return `.lumen-pdf/bundles/sha256/${hash}/reading-position.${deviceId}.json`;
+}
+
+export function legacySharedReadingStatePath(hash: string): string {
+  if (!HASH_PATTERN.test(hash)) throw new Error("Invalid PDF identity");
   return `.lumen-pdf/bundles/sha256/${hash}/reading-position.json`;
 }
 
 export function isSharedReadingStatePath(path: string): boolean {
-  return /^\.lumen-pdf\/bundles\/sha256\/[a-f0-9]{64}\/reading-position\.json$/.test(path);
+  return /^\.lumen-pdf\/bundles\/sha256\/[a-f0-9]{64}\/reading-position(?:\.[a-z0-9-]{1,64})?\.json$/.test(path);
 }
 
 export function readingPosition(value: unknown): ReadingPosition | null {
@@ -35,17 +45,36 @@ export function newerPosition(a: ReadingPosition | null, b: ReadingPosition | nu
 }
 
 export class ReadingPositionStore {
-  constructor(private readonly vault: Vault) {}
+  constructor(private readonly vault: Vault, private readonly deviceId: string) {}
 
   async read(hash: string): Promise<ReadingPosition | null> {
-    const path = sharedReadingStatePath(hash);
+    if (!HASH_PATTERN.test(hash)) throw new Error("Invalid PDF identity");
+    const folder = `.lumen-pdf/bundles/sha256/${hash}`;
+    const positions: ReadingPosition[] = [];
+    const legacy = await this.readFile(legacySharedReadingStatePath(hash));
+    if (legacy) positions.push(legacy);
+    const listing = await this.vault.adapter.list(folder);
+    const prefix = `${folder}/reading-position.`;
+    for (const path of listing.files) {
+      if (!path.startsWith(prefix) || !/^[a-z0-9-]{1,64}\.json$/.test(path.slice(prefix.length))) continue;
+      const position = await this.readFile(path);
+      if (position) positions.push(position);
+    }
+    return positions.reduce<ReadingPosition | null>((latest, position) => newerPosition(latest, position), null);
+  }
+
+  private async readFile(path: string): Promise<ReadingPosition | null> {
     if (!(await this.vault.adapter.exists(path))) return null;
-    const text = await this.vault.adapter.read(path);
-    const value: unknown = JSON.parse(text);
-    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid Lumen shared reading state");
-    const stored = value as Partial<SharedReadingState>;
-    if (stored.version !== 1) throw new Error("Invalid Lumen shared reading state");
-    return readingPosition(stored.position);
+    try {
+      const value: unknown = JSON.parse(await this.vault.adapter.read(path));
+      if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+      const stored = value as Partial<SharedReadingState>;
+      if (stored.version !== 1) return null;
+      return readingPosition(stored.position);
+    } catch {
+      // A partially synced legacy file cannot block valid device-specific files.
+      return null;
+    }
   }
 
   /** Reads 1.0.27's sidecar once during upgrade; all new writes use bundle JSON. */
@@ -60,9 +89,9 @@ export class ReadingPositionStore {
   }
 
   async save(hash: string, position: ReadingPosition): Promise<ReadingPosition> {
-    const current = await this.read(hash);
+    const path = sharedReadingStatePath(hash, this.deviceId);
+    const current = await this.readFile(path);
     if (current && current.updatedAt >= position.updatedAt) return current;
-    const path = sharedReadingStatePath(hash);
     await this.vault.adapter.write(path, `${JSON.stringify({ version: 1, position }, null, 2)}\n`);
     return position;
   }

@@ -53,7 +53,7 @@ export default class LumenPdfPlugin extends Plugin {
 
   async onload(): Promise<void> {
     this.settings = readSettings(await this.loadData() as unknown);
-    this.viewState = new PdfViewStateManager(this, state => this.saveMergedData({ pdfViewState: state }));
+    this.viewState = new PdfViewStateManager(this);
     await this.viewState.load();
     this.annotationSearch = new AnnotationSearchIndex(this.app, () => {
       const sources: AnnotationSearchSource[] = [];

@@ -628,7 +628,7 @@ test('actual mobile pinch follows its moving midpoint, preserves layer data, sav
 
 test('precise desktop zoom saves from a gesture without scrolling, restores, and uses the usual button stops', async () => {
   const { view, scheduler, rootEl, scrollEl } = renderer({ ViewClass: StatePdfView });
-  const manager = new PdfViewStateManager({ loadData: async () => ({}) }, async () => {});
+  const manager = new PdfViewStateManager({ loadData: async () => ({}) }, null);
   manager.attach({ view });
   await Promise.resolve();
   await Promise.resolve();
@@ -655,7 +655,7 @@ test('precise desktop zoom saves from a gesture without scrolling, restores, and
 
 test('detached-root state cleanup keeps the previous PDF scale after the same view switches documents', async () => {
   const { view, rootEl } = renderer({ ViewClass: StatePdfView });
-  const manager = new PdfViewStateManager({ loadData: async () => ({}) }, async () => {});
+  const manager = new PdfViewStateManager({ loadData: async () => ({}) }, null);
   await view.restoreZoom(1.37);
   await view.teardownDocument(false);
   view.file = { path: 'next.pdf' };
@@ -663,16 +663,25 @@ test('detached-root state cleanup keeps the previous PDF scale after the same vi
   view.buildShell(view.file);
   view.readerReady = true;
   await view.restoreZoom(2);
-  manager.capture(view, rootEl, 'fixture.pdf', true);
+  manager.capture(view, rootEl, 'fixture.pdf', true, true);
   assert.equal(manager.data.pdfs['fixture.pdf'].zoom, 1.37);
   assert.equal(view.currentZoom(), 2);
 });
 
 function stateVault() {
   const files = new Map();
-  return { files, adapter: {
+  const localStateStorage = () => {
+    const values = new Map();
+    return {
+      values,
+      getItem: key => values.get(key) ?? null,
+      setItem: (key, value) => values.set(key, value),
+    };
+  };
+  return { files, localStates: { desktop: localStateStorage(), mobile: localStateStorage() }, adapter: {
     exists: async path => files.has(path), read: async path => files.get(path),
     write: async (path, text) => { files.set(path, text); }, mkdir: async path => { files.set(path, ''); },
+    list: async path => ({ files: [...files.keys()].filter(file => file.startsWith(`${path}/`)), folders: [] }),
   } };
 }
 
@@ -682,24 +691,25 @@ async function stateReader(vault, mobile = false, initialData = {}, path = 'fixt
   fixture.view.getDocumentHash = () => hash;
   let data = initialData;
   const Manager = mobile ? MobileStateManager : PdfViewStateManager;
-  const manager = new Manager({ app: { vault }, loadData: async () => data }, async state => { data = { pdfViewState: state }; });
+  const manager = new Manager({ app: { vault }, loadData: async () => data }, vault.localStates[mobile ? 'mobile' : 'desktop']);
   await manager.load();
   manager.attach({ view: fixture.view });
   await new Promise(resolve => setImmediate(resolve));
   return { ...fixture, manager, data: () => data };
 }
 
-test('hidden per-PDF bundle JSON shares pages in both directions, keeps device zoom and survives PDF renames', async () => {
+test('hidden per-device bundle JSON shares pages in both directions, keeps local zoom and survives PDF renames', async () => {
   const vault = stateVault();
   const desktop = await stateReader(vault);
   await desktop.view.restoreZoom(1.37);
   desktop.view.restorePage(7);
   await desktop.manager.flush();
-  const positionPath = `.lumen-pdf/bundles/sha256/${'a'.repeat(64)}/reading-position.json`;
-  assert.deepEqual([...vault.files.keys()], [positionPath]);
-  assert.equal(JSON.parse(vault.files.get(positionPath)).position.page, 7);
+  const desktopPositionPath = `.lumen-pdf/bundles/sha256/${'a'.repeat(64)}/reading-position.${desktop.manager.deviceId}.json`;
+  assert.deepEqual([...vault.files.keys()], [desktopPositionPath]);
+  assert.equal(JSON.parse(vault.files.get(desktopPositionPath)).position.page, 7);
+  assert.equal(desktop.data().pdfViewState, undefined, 'zoom changes do not write synced plugin data.json');
 
-  // The phone has its own plugin settings; the hidden bundle file syncs.
+  // The phone has its own local zoom store; the hidden bundle file syncs.
   const mobile = await stateReader(vault, true);
   assert.equal(mobile.view.pageInput.value, '7');
   assert.equal(mobile.view.usesMobileFit(), true);
@@ -707,13 +717,16 @@ test('hidden per-PDF bundle JSON shares pages in both directions, keeps device z
   await mobile.view.restoreZoom(.75, false);
   mobile.view.restorePage(11);
   await mobile.manager.flush();
-  const phonePosition = vault.files.get(positionPath);
+  const mobilePositionPath = `.lumen-pdf/bundles/sha256/${'a'.repeat(64)}/reading-position.${mobile.manager.deviceId}.json`;
+  assert.notEqual(desktopPositionPath, mobilePositionPath, 'each device writes a separate page file');
+  assert.equal(JSON.parse(vault.files.get(mobilePositionPath)).position.page, 11);
+  const mobilePosition = vault.files.get(mobilePositionPath);
 
   // Closing an old desktop tab or changing only its zoom cannot reset it.
   await desktop.view.restoreZoom(2);
   await desktop.manager.flush();
   await desktop.manager.flush();
-  assert.equal(vault.files.get(positionPath), phonePosition);
+  assert.equal(vault.files.get(mobilePositionPath), mobilePosition);
   const reopened = await stateReader(vault, false, desktop.data());
   assert.equal(reopened.view.pageInput.value, '11');
   assert.equal(reopened.view.currentZoom(), 2);
@@ -729,12 +742,14 @@ test('future PDFs automatically receive independent hidden reading-position JSON
   const first = await stateReader(vault, false, {}, 'first.pdf', firstHash);
   first.view.restorePage(3);
   await first.manager.flush();
+  assert.equal(first.data().pdfViewState, undefined, 'page movement does not rewrite plugin data.json');
   const second = await stateReader(vault, false, {}, 'second.pdf', secondHash);
   second.view.restorePage(9);
   await second.manager.flush();
+  assert.equal(second.data().pdfViewState, undefined, 'new PDFs do not create shared zoom records during page navigation');
 
-  const firstPath = `.lumen-pdf/bundles/sha256/${firstHash}/reading-position.json`;
-  const secondPath = `.lumen-pdf/bundles/sha256/${secondHash}/reading-position.json`;
+  const firstPath = `.lumen-pdf/bundles/sha256/${firstHash}/reading-position.${first.manager.deviceId}.json`;
+  const secondPath = `.lumen-pdf/bundles/sha256/${secondHash}/reading-position.${second.manager.deviceId}.json`;
   assert.equal(JSON.parse(vault.files.get(firstPath)).position.page, 3);
   assert.equal(JSON.parse(vault.files.get(secondPath)).position.page, 9);
   assert.equal(vault.files.size, 2);
@@ -780,9 +795,30 @@ test('old platform records and 1.0.27 Markdown positions migrate into bundle JSO
   assert.equal(desktop.view.pageInput.value, '10');
   assert.equal(desktop.view.currentZoom(), 1.37);
   await desktop.manager.flush();
-  assert.equal(JSON.parse(vault.files.get(`.lumen-pdf/bundles/sha256/${'a'.repeat(64)}/reading-position.json`)).position.page, 10);
+  assert.equal(JSON.parse(vault.files.get(`.lumen-pdf/bundles/sha256/${'a'.repeat(64)}/reading-position.${desktop.manager.deviceId}.json`)).position.page, 10);
   assert.equal(vault.files.has(oldMarkdownPath), true);
   assert.equal(vault.files.size, 2);
+  assert.equal(desktop.data().pdfViewState.version, 1, 'reading-page migration does not rewrite synced plugin data.json');
+  assert.equal(desktop.manager.data.pdfs['fixture.pdf'].zoom, 1.37, 'legacy zoom is imported into device-local storage');
+  const localZoomText = [...vault.localStates.desktop.values.entries()].find(([key]) => key.includes('pdf-view-state'))?.[1];
+  assert.equal(JSON.parse(localZoomText).pdfs['fixture.pdf'].zoom, 1.37);
+});
+
+test('shared reading-position JSON wins over stale page records in plugin data.json', async () => {
+  const vault = stateVault();
+  const hash = 'a'.repeat(64);
+  const positionPath = `.lumen-pdf/bundles/sha256/${hash}/reading-position.json`;
+  const jsonPosition = { page: 12, updatedAt: 100 };
+  vault.files.set(positionPath, JSON.stringify({ version: 1, position: jsonPosition }));
+  const oldData = { pdfViewState: { version: 2, pdfs: {
+    'fixture.pdf': { page: 4, zoom: 1.5, updatedAt: 9000 },
+  } } };
+  const desktop = await stateReader(vault, false, oldData, 'fixture.pdf', hash);
+
+  assert.equal(desktop.view.pageInput.value, '12');
+  await desktop.manager.flush();
+  assert.equal(vault.files.get(positionPath), JSON.stringify({ version: 1, position: jsonPosition }));
+  assert.strictEqual(desktop.data(), oldData, 'old plugin page data is not rewritten or allowed to override the shared JSON');
 });
 
 test('dense annotation repaint releases its previous canvas before detaching it', () => {
