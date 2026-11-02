@@ -15,6 +15,7 @@ interface LumenSettings {
   legacyAnnotationFolder: string;
   automaticPdfBackups: boolean;
   indexAnnotations: boolean;
+  mobileToolbarDefault: "expanded" | "collapsed";
 }
 
 const DEFAULT_SETTINGS: LumenSettings = {
@@ -23,6 +24,7 @@ const DEFAULT_SETTINGS: LumenSettings = {
   legacyAnnotationFolder: "PDF annotations",
   automaticPdfBackups: false,
   indexAnnotations: false,
+  mobileToolbarDefault: "expanded",
 };
 
 function isPdfTheme(value: unknown): value is PdfTheme {
@@ -38,6 +40,7 @@ function readSettings(value: unknown): LumenSettings {
     legacyAnnotationFolder: typeof stored.legacyAnnotationFolder === "string" ? stored.legacyAnnotationFolder : DEFAULT_SETTINGS.legacyAnnotationFolder,
     automaticPdfBackups: typeof stored.automaticPdfBackups === "boolean" ? stored.automaticPdfBackups : DEFAULT_SETTINGS.automaticPdfBackups,
     indexAnnotations: typeof stored.indexAnnotations === "boolean" ? stored.indexAnnotations : DEFAULT_SETTINGS.indexAnnotations,
+    mobileToolbarDefault: stored.mobileToolbarDefault === "collapsed" ? "collapsed" : "expanded",
   };
 }
 
@@ -75,6 +78,10 @@ export default class LumenPdfPlugin extends Plugin {
       this.settings.automaticPdfBackups,
       () => this.viewState.attach(leaf),
       source => this.annotationSearch.schedule(source),
+      {
+        restore: hash => this.viewState.toolbar.resolve(hash, this.settings.mobileToolbarDefault === "collapsed"),
+        save: (hash, collapsed) => this.viewState.toolbar.save(hash, collapsed),
+      },
     ));
     if (this.settings.defaultViewer) this.installAsDefaultPdfViewer();
     this.registerObsidianProtocolHandler(LUMEN_PROTOCOL_ACTION, params => void this.openAnnotationLink(params).catch(error => {
@@ -290,7 +297,7 @@ class BackupRestoreModal extends FuzzySuggestModal<BundleInfo> {
   }
 }
 
-class LumenSettingTab extends PluginSettingTab {
+export class LumenSettingTab extends PluginSettingTab {
   constructor(private readonly plugin: LumenPdfPlugin) {
     super(plugin.app, plugin);
   }
@@ -306,6 +313,11 @@ class LumenSettingTab extends PluginSettingTab {
         name: "PDF theme",
         desc: "Use this document theme for every Lumen reader.",
         control: { type: "dropdown", key: "pdfTheme", options: { light: "Light", sepia: "Sepia", dark: "Dark" }, defaultValue: DEFAULT_SETTINGS.pdfTheme },
+      },
+      {
+        name: "Default mobile toolbar",
+        desc: "Start new PDFs with the tools row expanded or collapsed. Each PDF remembers its last state on this device, including after Obsidian restarts.",
+        control: { type: "dropdown", key: "mobileToolbarDefault", options: { expanded: "Expanded", collapsed: "Collapsed" }, defaultValue: DEFAULT_SETTINGS.mobileToolbarDefault },
       },
       {
         name: "Legacy annotation folder",
@@ -342,6 +354,7 @@ class LumenSettingTab extends PluginSettingTab {
   getControlValue(key: string): unknown {
     if (key === "defaultViewer") return this.plugin.settings.defaultViewer;
     if (key === "pdfTheme") return this.plugin.settings.pdfTheme;
+    if (key === "mobileToolbarDefault") return this.plugin.settings.mobileToolbarDefault;
     if (key === "legacyAnnotationFolder") return this.plugin.settings.legacyAnnotationFolder;
     if (key === "automaticPdfBackups") return this.plugin.settings.automaticPdfBackups;
     return undefined;
@@ -355,6 +368,10 @@ class LumenSettingTab extends PluginSettingTab {
       });
     }
     if (key === "pdfTheme" && isPdfTheme(value)) return this.plugin.setPdfTheme(value);
+    if (key === "mobileToolbarDefault" && (value === "expanded" || value === "collapsed")) {
+      this.plugin.settings.mobileToolbarDefault = value;
+      return this.plugin.saveSettings();
+    }
     if (key === "legacyAnnotationFolder" && typeof value === "string") {
       this.plugin.settings.legacyAnnotationFolder = value.trim().replace(/^\/+|\/+$/g, "") || "PDF annotations";
       return this.plugin.saveSettings();

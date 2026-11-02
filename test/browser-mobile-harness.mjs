@@ -12,8 +12,9 @@ await build({
   stdin: { contents: `import { LumenPdfView } from './src/view';
     import { PdfViewStateManager } from './src/view-state';
     import { ReadingPositionStore } from './src/reading-position';
+    import { LumenSettingTab } from './src/main';
     import { Platform, TFile } from 'obsidian';
-    window.LumenHarness = { LumenPdfView, PdfViewStateManager, ReadingPositionStore, Platform, TFile };`,
+    window.LumenHarness = { LumenPdfView, PdfViewStateManager, ReadingPositionStore, LumenSettingTab, Platform, TFile };`,
     resolveDir: process.cwd(), loader: 'ts' },
   outfile: path.join(output, 'harness.js'), bundle: true, format: 'iife', platform: 'browser', target: 'es2022',
   plugins: [{ name: 'harness-host', setup(builder) {
@@ -27,6 +28,10 @@ await build({
       }
       export class Scope { register() {} }
       export class Plugin {}
+      export class PluginSettingTab { constructor(app, plugin) { this.app = app; this.plugin = plugin; } }
+      export class Modal {}
+      export class FuzzySuggestModal {}
+      export class TFolder {}
       export class TFile { constructor(path, size = 0) { this.path = path; this.name = path.split('/').at(-1); this.basename = this.name.replace(/\\.pdf$/i, ''); this.extension = 'pdf'; this.stat = { mtime: 1, size }; } }
       export class Notice { constructor(text) { console.info('Notice:', text); } }
       export class Menu { addItem(fn) { fn({ setTitle() { return this; }, setIcon() { return this; }, setChecked() { return this; }, onClick() { return this; } }); return this; } showAtPosition() {} }

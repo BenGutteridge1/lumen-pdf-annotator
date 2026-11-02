@@ -20,6 +20,7 @@ import {
 } from "./outline";
 import { DocumentBundle, LegacyAnnotationRecord, loadLegacyAnnotations, openBundle } from "./storage";
 import type { AnnotationSearchSource } from "./annotation-search-index";
+import type { MobileToolbarPreferences } from "./toolbar-state";
 
 export const LUMEN_VIEW_TYPE = "lumen-pdf-view";
 export type PdfTheme = "light" | "sepia" | "dark";
@@ -363,6 +364,7 @@ export class LumenPdfView extends FileView {
     private readonly automaticPdfBackups = false,
     private readonly onReaderReady?: () => void,
     private readonly onAnnotationsChanged?: (source: AnnotationSearchSource) => void,
+    private readonly toolbarPreferences?: MobileToolbarPreferences,
   ) {
     super(leaf);
     this.theme = initialTheme;
@@ -496,6 +498,7 @@ export class LumenPdfView extends FileView {
       this.pdfWorker = loaded.worker;
       this.workerPort = loaded.port;
       this.documentHash = bundle.hash;
+      this.mobileToolbarCollapsed = this.mobileRuntime ? this.toolbarPreferences?.restore(bundle.hash) ?? false : false;
       this.buildShell(file);
       await this.buildPages(generation);
       if (generation !== this.documentGeneration) return;
@@ -867,6 +870,7 @@ export class LumenPdfView extends FileView {
       this.toolbarActionsEl = actions;
       this.toolbarToggleButton = iconButton("chevron-up", "Hide PDF tools", () => {
         this.mobileToolbarCollapsed = !this.mobileToolbarCollapsed;
+        if (this.documentHash) this.toolbarPreferences?.save(this.documentHash, this.mobileToolbarCollapsed);
         this.updateMobileToolbarState();
       });
       this.toolbarToggleButton.type = "button";
