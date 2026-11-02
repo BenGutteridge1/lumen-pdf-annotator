@@ -1448,8 +1448,12 @@
  * desktop geometry and interaction model stay unchanged.
  */
 .lumen-reader.is-mobile {
-  --lumen-mobile-toolbar-height: 102px;
+  --lumen-mobile-toolbar-height: 114px;
+  --lumen-toolbar-motion: 240ms cubic-bezier(.2, .8, .2, 1);
   overscroll-behavior: none;
+}
+.lumen-reader.is-mobile.is-toolbar-collapsed {
+  --lumen-mobile-toolbar-height: 68px;
 }
 .lumen-reader.is-mobile.has-mobile-keyboard {
   /* Android may resize the leaf to the area above the keyboard. Extend only
@@ -1463,6 +1467,7 @@
   scroll-padding-top: calc(var(--lumen-mobile-toolbar-height) + env(safe-area-inset-top, 0px));
   touch-action: pan-x pan-y;
   -webkit-overflow-scrolling: touch;
+  transition: padding-top var(--lumen-toolbar-motion), scroll-padding-top var(--lumen-toolbar-motion);
 }
 .lumen-reader.is-mobile .lumen-pages {
   gap: 12px;
@@ -1475,24 +1480,67 @@
   width: calc(100% - 12px - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px));
   max-width: none;
   height: auto;
-  min-height: 88px;
-  flex-wrap: wrap;
+  min-height: 0;
+  flex-direction: column;
   justify-content: center;
-  gap: 2px 6px;
+  gap: 0;
   padding: 4px 6px;
   border-radius: 16px;
   background: var(--lumen-surface);
   backdrop-filter: none;
   touch-action: manipulation;
 }
+.lumen-reader.is-mobile .lumen-toolbar-primary {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+}
+.lumen-reader.is-mobile .lumen-toolbar-secondary {
+  display: grid;
+  grid-template-rows: 1fr;
+  width: 100%;
+  padding-top: 2px;
+  overflow: hidden;
+  opacity: 1;
+  transition: grid-template-rows var(--lumen-toolbar-motion), padding-top var(--lumen-toolbar-motion), opacity var(--lumen-toolbar-motion);
+}
+.lumen-reader.is-mobile.is-toolbar-collapsed .lumen-toolbar-secondary {
+  grid-template-rows: 0fr;
+  padding-top: 0;
+  opacity: 0;
+  pointer-events: none;
+}
 .lumen-reader.is-mobile .lumen-page-group,
 .lumen-reader.is-mobile .lumen-zoom-group {
   grid-template-columns: 44px auto 44px;
 }
 .lumen-reader.is-mobile .lumen-toolbar-actions {
-  flex: 1 0 100%;
   justify-content: center;
   gap: 2px;
+  min-height: 0;
+  overflow: hidden;
+  transform: translateY(0);
+  transition: transform var(--lumen-toolbar-motion);
+}
+.lumen-reader.is-mobile.is-toolbar-collapsed .lumen-toolbar-actions {
+  transform: translateY(-6px);
+}
+.lumen-reader.is-mobile .lumen-toolbar-toggle svg {
+  transform: rotate(0deg);
+  transition: transform var(--lumen-toolbar-motion);
+}
+.lumen-reader.is-mobile.is-toolbar-collapsed .lumen-toolbar-toggle svg {
+  transform: rotate(180deg);
+}
+.lumen-reader.is-mobile .lumen-toolbar:not(#lumen-specificity) .lumen-toolbar-toggle {
+  flex-shrink: 0;
+  background: color-mix(in srgb, var(--lumen-accent) 8%, transparent);
+  color: var(--lumen-accent);
+}
+.lumen-reader.is-mobile .lumen-toolbar:not(#lumen-specificity) .lumen-toolbar-toggle:hover {
+  background: color-mix(in srgb, var(--lumen-accent) 15%, transparent);
 }
 .lumen-reader.is-mobile .lumen-toolbar:not(#lumen-specificity) .lumen-icon-button {
   width: 44px;
@@ -1505,13 +1553,13 @@
   height: 18px;
 }
 .lumen-reader.is-mobile .lumen-page-indicator {
-  min-width: 88px;
+  min-width: 70px;
   height: 44px;
-  grid-template-columns: 38px 10px minmax(40px, auto);
+  grid-template-columns: 32px 8px minmax(30px, auto);
 }
 .lumen-reader.is-mobile .lumen-page-group .lumen-page-input:not(#lumen-specificity) {
-  width: 38px;
-  min-width: 38px;
+  width: 32px;
+  min-width: 32px;
   height: 44px;
   font-size: 16px;
 }
@@ -1520,7 +1568,10 @@
   font-size: 13px;
 }
 .lumen-reader.is-mobile .lumen-zoom-group .lumen-zoom-label {
-  width: 52px;
+  width: 40px;
+}
+.lumen-reader.is-mobile .lumen-page-group .lumen-page-total {
+  min-width: 30px;
 }
 .lumen-reader.is-mobile .lumen-theme-switcher {
   height: 44px;
@@ -1552,6 +1603,7 @@
   border-radius: 18px;
   background: var(--lumen-surface);
   transform: translateY(18px) scale(.99);
+  transition: opacity 150ms ease, transform 150ms ease, top var(--lumen-toolbar-motion);
 }
 .lumen-reader.is-mobile .lumen-search-panel.is-open,
 .lumen-reader.is-mobile .lumen-outline-panel.is-open,
@@ -1892,26 +1944,23 @@
     background: var(--lumen-surface);
   }
 }
-@media (max-width: 360px) {
+@media (max-width: 374px) {
   .lumen-reader.is-mobile .lumen-toolbar {
     width: calc(100% - 8px - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px));
-    gap: 2px 0;
   }
-  .lumen-reader.is-mobile .lumen-page-indicator {
-    min-width: 78px;
-    grid-template-columns: 32px 8px minmax(38px, auto);
+  .lumen-reader.is-mobile .lumen-toolbar-primary {
+    gap: 0;
   }
-  .lumen-reader.is-mobile .lumen-page-group .lumen-page-input:not(#lumen-specificity) {
-    width: 32px;
-    min-width: 32px;
-  }
-  .lumen-reader.is-mobile .lumen-zoom-group .lumen-zoom-label {
-    width: 42px;
+  .lumen-reader.is-mobile .lumen-zoom-label {
+    display: none;
   }
   .lumen-reader.is-mobile .lumen-zoom-group {
+    grid-template-columns: 44px 44px;
     padding-left: 0;
     border-left: 0;
   }
+}
+@media (max-width: 360px) {
   .lumen-selection-palette.is-mobile-surface .lumen-color-row {
     padding-right: 44px;
   }
@@ -1947,15 +1996,35 @@
 }
 @media (min-width: 600px) {
   .lumen-reader.is-mobile {
-    --lumen-mobile-toolbar-height: 58px;
+    --lumen-mobile-toolbar-height: 68px;
   }
   .lumen-reader.is-mobile .lumen-toolbar {
     width: auto;
     min-height: 44px;
+    flex-direction: row;
     flex-wrap: nowrap;
+    gap: 6px;
+  }
+  .lumen-reader.is-mobile .lumen-toolbar-primary,
+  .lumen-reader.is-mobile .lumen-toolbar-secondary {
+    display: contents;
+  }
+  .lumen-reader.is-mobile .lumen-toolbar-toggle {
+    display: none;
   }
   .lumen-reader.is-mobile .lumen-toolbar-actions {
-    flex-basis: auto;
+    overflow: visible;
+  }
+  .lumen-reader.is-mobile .lumen-page-indicator {
+    min-width: 88px;
+    grid-template-columns: 38px 10px minmax(40px, auto);
+  }
+  .lumen-reader.is-mobile .lumen-page-group .lumen-page-input:not(#lumen-specificity) {
+    width: 38px;
+    min-width: 38px;
+  }
+  .lumen-reader.is-mobile .lumen-zoom-group .lumen-zoom-label {
+    width: 52px;
   }
   .lumen-reader.is-mobile .lumen-search-panel {
     right: auto;
