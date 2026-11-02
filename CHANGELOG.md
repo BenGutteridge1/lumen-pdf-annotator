@@ -2,6 +2,11 @@
 
 All notable changes to Lumen PDF Annotator are documented here.
 
+## 1.0.32 — 2026-11-02
+
+- Match the editable current-page number to the existing total-page text size on desktop, phone, and tablet. Keep the native number input, support four-digit page counts, and retain a 16px native input font on mobile to avoid iOS focus zoom.
+- Keep the PDF stationary while the compact phone toolbar expands or collapses. The toolbar and its panels still animate, while document clearance and scroll height stay fixed; mobile page navigation lands below the toolbar.
+
 ## 1.0.31 — 2026-11-02
 
 - Use explicit flex wrappers and grid gaps for the mobile toolbar to resolve CSS compatibility warnings while preserving the compact phone layout and the existing tablet and desktop controls.

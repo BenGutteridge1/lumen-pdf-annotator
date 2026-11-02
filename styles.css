@@ -1308,6 +1308,19 @@
   border: 0;
   background: transparent;
 }
+/* Native inputs can inherit a different font from Obsidian's control rules.
+ * Keep the editable number and its denominator on the same numeric baseline. */
+.lumen-page-indicator:not(#lumen-specificity) > .lumen-page-input,
+.lumen-page-indicator:not(#lumen-specificity) > .lumen-page-separator,
+.lumen-page-indicator:not(#lumen-specificity) > .lumen-page-total {
+  font-family: var(--font-interface);
+  font-size: var(--lumen-page-indicator-font-size, 12px);
+  font-weight: 400;
+  font-style: normal;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  letter-spacing: normal;
+}
 .lumen-search-input-wrap:not(#lumen-specificity) input {
   height: 30px;
   padding: 0;
@@ -1449,6 +1462,7 @@
  */
 .lumen-reader.is-mobile {
   --lumen-mobile-toolbar-height: 68px;
+  --lumen-mobile-document-clearance: 68px;
   --lumen-toolbar-motion: 240ms cubic-bezier(.2, .8, .2, 1);
   overscroll-behavior: none;
 }
@@ -1459,13 +1473,14 @@
   min-height: calc(100% + var(--lumen-mobile-keyboard-extra-height, 0px));
 }
 .lumen-reader.is-mobile .lumen-scroll {
-  padding: calc(var(--lumen-mobile-toolbar-height) + env(safe-area-inset-top, 0px)) calc(8px + env(safe-area-inset-right, 0px)) calc(24px + env(safe-area-inset-bottom, 0px)) calc(8px + env(safe-area-inset-left, 0px));
+  /* Only the floating toolbar and panels animate. Changing document padding
+   * moves pages and clamps scrollTop near the end of the PDF. */
+  padding: calc(var(--lumen-mobile-document-clearance) + env(safe-area-inset-top, 0px)) calc(8px + env(safe-area-inset-right, 0px)) calc(24px + env(safe-area-inset-bottom, 0px)) calc(8px + env(safe-area-inset-left, 0px));
   overscroll-behavior: contain;
-  scroll-padding-top: calc(var(--lumen-mobile-toolbar-height) + env(safe-area-inset-top, 0px));
+  scroll-padding-top: calc(var(--lumen-mobile-document-clearance) + env(safe-area-inset-top, 0px));
   touch-action: pan-x pan-y;
   -webkit-overflow-scrolling: touch;
   scrollbar-width: none;
-  transition: padding-top var(--lumen-toolbar-motion), scroll-padding-top var(--lumen-toolbar-motion);
 }
 .lumen-reader.is-mobile .lumen-scroll::-webkit-scrollbar {
   display: none;
@@ -1476,7 +1491,7 @@
   gap: 12px;
 }
 .lumen-reader.is-mobile .lumen-page {
-  scroll-margin-top: calc(var(--lumen-mobile-toolbar-height) + env(safe-area-inset-top, 0px));
+  scroll-margin-top: calc(var(--lumen-mobile-document-clearance) + env(safe-area-inset-top, 0px));
 }
 .lumen-reader.is-mobile .lumen-toolbar {
   top: calc(6px + env(safe-area-inset-top, 0px));
@@ -1537,15 +1552,24 @@
   height: 18px;
 }
 .lumen-reader.is-mobile .lumen-page-indicator {
+  --lumen-page-indicator-font-size: 13px;
+  --lumen-page-input-scale: .8125;
   min-width: 88px;
   height: 44px;
+  grid-template-rows: minmax(0, 1fr);
   grid-template-columns: 38px 10px minmax(40px, auto);
 }
 .lumen-reader.is-mobile .lumen-page-group .lumen-page-input:not(#lumen-specificity) {
-  width: 38px;
-  min-width: 38px;
-  height: 44px;
+  /* Keep a native 16px input for iOS focus, then render its text at the total's
+   * existing size. Compensate the box so the visible field keeps its full hit
+   * area and four-digit capacity, without replacing the editable control. */
+  width: calc(38px / var(--lumen-page-input-scale));
+  min-width: calc(38px / var(--lumen-page-input-scale));
+  height: calc(44px / var(--lumen-page-input-scale));
+  justify-self: center;
   font-size: 16px;
+  transform: scale(var(--lumen-page-input-scale));
+  transform-origin: center;
 }
 .lumen-reader.is-mobile .lumen-page-total,
 .lumen-reader.is-mobile .lumen-zoom-label {
@@ -1560,6 +1584,7 @@
 @media (max-width: 599px) {
   .lumen-reader.is-mobile {
     --lumen-mobile-toolbar-height: 81px;
+    --lumen-mobile-document-clearance: 81px;
   }
   .lumen-reader.is-mobile.is-toolbar-collapsed {
     --lumen-mobile-toolbar-height: 52px;
@@ -1638,18 +1663,19 @@
     width: 36px;
   }
   .lumen-reader.is-mobile .lumen-page-indicator {
-    min-width: 60px;
+    --lumen-page-indicator-font-size: 12px;
+    --lumen-page-input-scale: .75;
+    min-width: 74px;
     height: 26px;
-    grid-template-columns: 30px 6px minmax(24px, auto);
+    grid-template-columns: 34px 6px minmax(34px, auto);
   }
   .lumen-reader.is-mobile .lumen-page-group .lumen-page-input:not(#lumen-specificity) {
-    width: 30px;
-    min-width: 30px;
-    height: 26px;
+    width: calc(34px / var(--lumen-page-input-scale));
+    min-width: calc(34px / var(--lumen-page-input-scale));
+    height: calc(26px / var(--lumen-page-input-scale));
   }
   .lumen-reader.is-mobile .lumen-page-group .lumen-page-total {
-    min-width: 24px;
-    font-size: 12px;
+    min-width: 34px;
   }
   .lumen-reader.is-mobile .lumen-toolbar .lumen-icon-button svg {
     width: 16px;

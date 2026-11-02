@@ -47,6 +47,9 @@ const SCROLL_PREVIEW_DPR = .65;
 const CURRENT_PAGE_VIEWPORT_FRACTION = .12;
 const CURRENT_PAGE_MIN_OFFSET = 72;
 const CURRENT_PAGE_MAX_OFFSET = 160;
+// offsetTop rounds to whole CSS pixels, while mobile scrolling can land on a
+// fractional device-pixel boundary. Absorb that rounding at the reading line.
+const MOBILE_PAGE_BOUNDARY_TOLERANCE = 1;
 const SEARCH_WHITESPACE = /\s/;
 const MOBILE_MAX_CANVAS_PIXELS = 6_000_000;
 const MOBILE_MAX_MARK_CANVAS_PIXELS = 2_000_000;
@@ -350,6 +353,7 @@ export class LumenPdfView extends FileView {
   private ignoreContextMenuUntil = 0;
   private mobileSuspended = false;
   private mobileLayoutWidth = 0;
+  private mobileDocumentClearance = 0;
   private mobileViewportBaselineWidth = 0;
   private mobileViewportBaselineHeight = 0;
   private mobilePanelHeight = 0;
@@ -1697,7 +1701,9 @@ export class LumenPdfView extends FileView {
     );
     // Match the point used by updateCurrentPage so button and shortcut zoom
     // retain both the visible page and the reader's position within it.
-    return this.captureZoomAnchor(rect.left + this.scrollEl.clientWidth / 2, rect.top + viewportOffset);
+    return this.captureZoomAnchor(rect.left + this.scrollEl.clientWidth / 2,
+      rect.top + Math.max(viewportOffset, this.mobileDocumentClearance)
+        + (this.mobileRuntime ? MOBILE_PAGE_BOUNDARY_TOLERANCE : 0));
   }
 
   private restoreZoomAnchor(anchor: ZoomAnchor | null): void {
@@ -1885,6 +1891,9 @@ export class LumenPdfView extends FileView {
   private updateMobileViewportMetrics(): void {
     if (!this.mobileRuntime || !this.rootEl?.isConnected) return;
     const doc = this.containerEl.ownerDocument;
+    // Cache alongside the existing viewport reads, never during scrolling or
+    // the toolbar animation. Safe-area insets can exceed the normal page anchor.
+    this.mobileDocumentClearance = Number.parseFloat(getComputedStyle(this.scrollEl).scrollPaddingTop) || 0;
     const viewWindow = doc.defaultView;
     const viewport = viewWindow?.visualViewport;
     const viewportWidth = viewport?.width ?? viewWindow?.innerWidth ?? this.rootEl.clientWidth;
@@ -2061,7 +2070,8 @@ export class LumenPdfView extends FileView {
       CURRENT_PAGE_MIN_OFFSET,
       CURRENT_PAGE_MAX_OFFSET,
     );
-    const target = this.scrollEl.scrollTop + viewportOffset;
+    const target = this.scrollEl.scrollTop + Math.max(viewportOffset, this.mobileDocumentClearance)
+      + (this.mobileRuntime ? MOBILE_PAGE_BOUNDARY_TOLERANCE : 0);
     let low = 1;
     let high = this.pdfDocument.numPages;
     let bestPage = 1;
@@ -2147,9 +2157,12 @@ export class LumenPdfView extends FileView {
     this.updateOutlineCurrent();
     const rootRect = this.scrollEl.getBoundingClientRect();
     const shellRect = shell.getBoundingClientRect();
+    const clearance = this.mobileRuntime
+      ? Math.max(14, this.mobileDocumentClearance)
+      : 14;
     const offset = yRatio === undefined
-      ? 14
-      : Math.max(14, Math.min(160, this.scrollEl.clientHeight * .2)) - clamp(yRatio, 0, 1) * shellRect.height;
+      ? clearance
+      : Math.max(clearance, Math.min(160, this.scrollEl.clientHeight * .2)) - clamp(yRatio, 0, 1) * shellRect.height;
     const targetTop = this.scrollEl.scrollTop + shellRect.top - rootRect.top - offset;
     this.scrollEl.scrollTo({ top: Math.max(0, targetTop), behavior });
   }
