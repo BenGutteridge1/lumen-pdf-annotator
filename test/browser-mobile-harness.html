@@ -2,7 +2,9 @@
 <title>Lumen mobile integration checks</title><link rel="stylesheet" href="styles.css">
 <style>
 :root{font-family:system-ui;color:#24262c;background:#f2f4f8;--text-normal:#24262c;--text-muted:#667085;--text-faint:#9aa0ae;--background-primary:white;--background-secondary:#f5f6fa;--background-modifier-border:#d7dce5;--interactive-accent:#6955dc;--interactive-accent-hsl:249,65%,60%;--text-on-accent:white;--font-interface:system-ui;--font-text:system-ui;--font-ui-small:13px;--radius-s:5px;--radius-m:8px}
-body{margin:24px}h1{font-size:23px;margin:0 0 12px}p{max-width:920px;color:#667085}button{cursor:pointer;font:inherit}#run{padding:10px 18px;background:#6955dc;color:white;border:0;border-radius:8px}#status{font-weight:600;padding:12px 0}#results{padding-left:24px;line-height:1.8}#readers{display:flex;gap:20px;align-items:start;flex-wrap:wrap}.reader-frame{position:relative;width:390px;height:680px;background:white;border:1px solid #ccd3e0;border-radius:12px;overflow:hidden}.reader-frame.desktop{width:780px}.view-content{width:100%;height:100%;padding:0}input,select,button{font:inherit}.check-pass{color:#146c35}.check-fail{color:#b42318}
+body{margin:24px}h1{font-size:23px;margin:0 0 12px}p{max-width:920px;color:#667085}button{cursor:pointer;font:inherit}#run{padding:10px 18px;background:#6955dc;color:white;border:0;border-radius:8px}#status{font-weight:600;padding:12px 0}#results{padding-left:24px;line-height:1.8}#readers{display:flex;gap:20px;align-items:start;flex-wrap:wrap}.reader-frame{position:relative;flex:0 0 auto;width:390px;height:680px;background:white;border:1px solid #ccd3e0;border-radius:12px;overflow:hidden}.reader-frame.desktop{width:780px}.view-content{width:100%;height:100%;padding:0}input,select,button{font:inherit}.check-pass{color:#146c35}.check-fail{color:#b42318}
+/* Model a host theme loading broad native-control rules after plugin CSS. */
+.reader-frame input[type=number]{font-family:serif;font-size:18px;font-weight:600;font-style:italic;font-variant-numeric:normal;line-height:1.6;letter-spacing:1px}
 </style>
 <h1>Lumen mobile integration checks</h1>
 <p>Exercises the actual reader, bundled PDF.js worker, annotation storage and reading-state manager in a browser host. Uses an original synthetic 12-page PDF with a hierarchical table of contents and 2,880 desktop-format annotations. The two readers have separate plugin settings and share only normal vault files.</p>
@@ -58,8 +60,124 @@ globalThis.createEl = (tag, options) => element(tag, options);
 globalThis.createDiv = options => element('div', options);
 globalThis.createFragment = () => document.createDocumentFragment();
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+const frame = () => new Promise(requestAnimationFrame);
 async function until(fn, timeout = 8000) { const end = performance.now() + timeout; while (!fn()) { if (performance.now() > end) throw Error('Timed out waiting for reader'); await delay(40); } }
 function assert(value, message) { if (!value) throw Error(message); }
+const numericFontProperties = ['fontFamily','fontSize','fontWeight','fontStyle','fontVariantNumeric','lineHeight','letterSpacing'];
+async function indicatorChecks(item) {
+  const view = item.view, input = view.pageInput, total = view.pageTotal;
+  const parts = [input, view.rootEl.querySelector('.lumen-page-separator'), total];
+  const typography = parts.map(part => {
+    const style = getComputedStyle(part), font = Object.fromEntries(numericFontProperties.map(key => [key, style[key]]));
+    const scale = style.transform === 'none' ? 1 : Math.abs(new DOMMatrixReadOnly(style.transform).a);
+    return {...font,scale,visualFontSize:parseFloat(font.fontSize)*scale,visualLineHeight:parseFloat(font.lineHeight)*scale};
+  });
+  const expectedSize = view.isMobileView() && matchMedia('(min-width: 600px)').matches ? 13 : 12;
+  const matched = typography.every(style => numericFontProperties.filter(key => !['fontSize','lineHeight'].includes(key)).every(key => style[key] === typography[0][key])
+      && Math.abs(style.visualFontSize - expectedSize) < .01 && Math.abs(style.visualLineHeight - expectedSize) < .01)
+    && typography[0].fontSize === (view.isMobileView() ? '16px' : '12px') && typography[0].fontWeight === '400';
+  const savedInput = input.value, savedTotal = total.textContent;
+  const fits = [];
+  for (const [current, count] of [['164','225'],['1234','9999']]) {
+    input.value = current; total.textContent = count;
+    const probe = element('span', {text:current}, view.rootEl);
+    Object.assign(probe.style, Object.fromEntries(numericFontProperties.map(key => [key, typography[0][key]])), {position:'absolute',visibility:'hidden',whiteSpace:'pre'});
+    const font = getComputedStyle(input), width = probe.getBoundingClientRect().width;
+    const contentWidth = input.clientWidth - parseFloat(font.paddingLeft) - parseFloat(font.paddingRight);
+    probe.textContent = count;
+    Object.assign(probe.style, Object.fromEntries(numericFontProperties.map(key => [key, typography[2][key]])));
+    const totalFits = probe.getBoundingClientRect().width <= total.clientWidth + .5;
+    const primary = view.rootEl.querySelector('.lumen-toolbar-primary') ?? view.toolbarEl;
+    const bounds = primary.getBoundingClientRect();
+    const controlsFit = [...primary.children].every(child => {
+      const rect = child.getBoundingClientRect();
+      return rect.left >= bounds.left - .5 && rect.right <= bounds.right + .5;
+    });
+    fits.push({current,count,width,contentWidth,totalFits,controlsFit,passed:width <= contentWidth + .5 && totalFits && controlsFit});
+    probe.remove();
+  }
+  input.value = savedInput; total.textContent = savedTotal;
+  return {matched, typography, fits, passed:matched && fits.every(result => result.passed)};
+}
+async function navigateWithInput(item, page, event = 'enter') {
+  const input = item.view.pageInput;
+  input.focus({preventScroll:true});
+  const native = input instanceof HTMLInputElement && input.type === 'number' && document.activeElement === input;
+  input.value = String(page);
+  input.dispatchEvent(new Event('input', {bubbles:true}));
+  if (event === 'enter') input.dispatchEvent(new KeyboardEvent('keydown', {key:'Enter',bubbles:true,cancelable:true}));
+  else { input.dispatchEvent(new Event('change', {bubbles:true})); input.blur(); }
+  const view = item.view;
+  const scroll = view.scrollEl, shell = view.pages.get(page).shell;
+  const clearance = view.isMobileView() ? Math.max(14,view.mobileDocumentClearance) : 14;
+  // goToPage assigns the input synchronously, before native smooth scrolling
+  // begins. Require the real page landing and an idle scroll after a frame.
+  await frame();
+  await until(() => {
+    const pageTop = shell.getBoundingClientRect().top - scroll.getBoundingClientRect().top;
+    const landed = Math.abs(pageTop - clearance) <= 1
+      || (scroll.scrollTop >= scroll.scrollHeight - scroll.clientHeight - 1 && pageTop >= clearance);
+    return view.currentPage === page && input.value === String(page) && document.activeElement !== input
+      && !view.isScrolling && landed;
+  });
+  return native;
+}
+async function toolbarMotionChecks(item) {
+  const view = item.view, toggle = view.toolbarToggleButton, scroll = view.scrollEl;
+  if (!matchMedia('(max-width: 599px)').matches || !toggle) return {phoneLayout:false,passed:true,samples:[]};
+  const initiallyCollapsed = view.rootEl.classList.contains('is-toolbar-collapsed');
+  const samples = [];
+  for (const position of ['top','middle','end']) {
+    if (view.rootEl.classList.contains('is-toolbar-collapsed')) { toggle.click(); await delay(320); }
+    const page = view.pages.get(position === 'top' ? 1 : position === 'end' ? view.pdfDocument.numPages : 6).shell;
+    scroll.scrollTo({top:position === 'top' ? 0 : position === 'end' ? scroll.scrollHeight - scroll.clientHeight : page.offsetTop + page.clientHeight * .35,behavior:'instant'});
+    // Let scroll-triggered detail upgrades and far-page eviction finish before
+    // isolating work caused by the toggle itself.
+    await delay(2050);
+    await until(() => !view.isScrolling && view.activePageMounts === 0
+      && [...view.pages.values()].every(state => !state.rendering && !state.textRendering));
+    for (const direction of ['collapse','expand']) {
+      const measure = () => ({
+        pageTop:page.getBoundingClientRect().top - scroll.getBoundingClientRect().top,
+        scrollTop:scroll.scrollTop,scrollHeight:scroll.scrollHeight,
+        paddingTop:getComputedStyle(scroll).paddingTop,scrollPaddingTop:getComputedStyle(scroll).scrollPaddingTop,
+        toolbarHeight:view.toolbarEl.getBoundingClientRect().height,
+      });
+      const canvases = [...view.rootEl.querySelectorAll('.lumen-page canvas')].map(node => ({node,width:node.width,height:node.height}));
+      const renderStates = [...view.pages.values()].map(state => ({state,generation:state.renderGeneration,task:state.renderTask}));
+      const pdfWork = {mountCalls:0,pdfRenders:0,markRenders:0,layerReleases:0}, restore = [];
+      for (const [method,counter] of [['mountPage','mountCalls'],['renderMarks','markRenders'],['releasePageLayers','layerReleases']]) {
+        const original = view[method];
+        view[method] = function(...args) { pdfWork[counter]++; return original.apply(this,args); };
+        restore.push(() => { view[method] = original; });
+      }
+      for (const state of view.pages.values()) if (state.page) {
+        const pdfPage = state.page, original = pdfPage.render;
+        pdfPage.render = function(...args) { pdfWork.pdfRenders++; return original.apply(this,args); };
+        restore.push(() => { pdfPage.render = original; });
+      }
+      const canvasCount = canvasHistory.length;
+      const before = measure(), frames = [{elapsed:0,...before}], start = performance.now();
+      try {
+        toggle.click();
+        while (performance.now() - start < 360) { await frame(); frames.push({elapsed:performance.now()-start,...measure()}); }
+      } finally { restore.forEach(fn => fn()); }
+      const canvasesStable = canvases.length > 0 && canvasHistory.length === canvasCount
+        && canvases.every(({node,width,height}) => node.isConnected && node.width === width && node.height === height);
+      const renderStatesStable = renderStates.every(({state,generation,task}) => state.renderGeneration === generation && state.renderTask === task);
+      const noPdfWork = Object.values(pdfWork).every(count => count === 0) && canvasesStable && renderStatesStable;
+      const maximum = key => Math.max(...frames.map(sample => Math.abs(sample[key] - before[key])));
+      samples.push({position,direction,frames,pdfWork,canvasesStable,renderStatesStable,noPdfWork,maxPageMovement:maximum('pageTop'),maxScrollMovement:maximum('scrollTop'),maxHeightChange:maximum('scrollHeight'),
+        passed:maximum('pageTop') < .5 && maximum('scrollTop') < .5 && maximum('scrollHeight') < .5
+          && frames.every(sample => sample.paddingTop === before.paddingTop && sample.scrollPaddingTop === before.scrollPaddingTop)});
+    }
+  }
+  if (view.rootEl.classList.contains('is-toolbar-collapsed') !== initiallyCollapsed) { toggle.click(); await delay(320); }
+  view.restorePage(4);
+  return {phoneLayout:true,initiallyCollapsed,samples,maxPageMovement:Math.max(...samples.map(sample => sample.maxPageMovement)),noPdfWork:samples.every(sample => sample.noPdfWork),passed:samples.every(sample => sample.passed)};
+}
+window.checkHarnessIndicator = indicatorChecks;
+window.checkHarnessToolbarMotion = toolbarMotionChecks;
 function touch(target, name, points) {
   const event = new Event(name, {cancelable:true,bubbles:true});
   const touches = points.map(([identifier,clientX,clientY])=>({identifier,clientX,clientY,target}));
@@ -152,12 +270,34 @@ async function run() {
     }
     async function close(item) { await item.manager.flush(); await item.view.onClose(); item.view.cleanups.forEach(fn=>fn()); item.frame.remove(); }
     window.closeHarnessReader = close;
-    window.openHarnessPdf = (path = 'Different.pdf', pageCount = 13) => reader(true, {}, path, pdfBytes(pageCount));
+    window.openHarnessPdf = (path = 'Different.pdf', pageCount = 13, mobile = true) => reader(mobile, {}, path, pdfBytes(pageCount));
+    window.openHarnessDesktopPdf = (path = 'Desktop.pdf', pageCount = 225) => reader(false, {}, path, pdfBytes(pageCount));
     const desktop = await reader(false);
     desktop.view.restorePage(4); await desktop.view.restoreZoom(1.37); await desktop.manager.flush();
     check('Desktop opens the annotated PDF and writes page 4 into its hidden bundle JSON', desktop.view.index.size===2880 && (await new ReadingPositionStore(vault,desktop.manager.deviceId).read(hash)).page===4);
     const phone = await reader(true);
     check('Independent phone restores desktop page 4 and keeps fit-to-width zoom', phone.view.currentPage===4 && phone.view.usesMobileFit() && phone.view.currentZoom()<1.37);
+    const desktopIndicator = await indicatorChecks(desktop), phoneIndicator = await indicatorChecks(phone);
+    window.harnessTypography = {desktop:desktopIndicator,mobile:phoneIndicator};
+    check('Desktop and mobile page numbers match their totals despite host font overrides and fit three/four digits', desktopIndicator.passed && phoneIndicator.passed);
+    const desktopNative = await navigateWithInput(desktop,3) && await navigateWithInput(desktop,5,'change');
+    const phoneNative = await navigateWithInput(phone,3) && await navigateWithInput(phone,5,'change');
+    check('Native number inputs keep focus, typed values, Enter navigation and change navigation on desktop and mobile', desktopNative && phoneNative);
+    desktop.view.restorePage(4); phone.view.restorePage(4);
+    const motion = await toolbarMotionChecks(phone);
+    window.harnessToolbarMotion = motion;
+    if (motion.phoneLayout) {
+      check(`Phone collapse/expand keeps PDF geometry fixed at top, middle and end (max frame movement ${motion.maxPageMovement.toFixed(3)}px)`, motion.passed);
+      check('All six toolbar animations reuse PDF/annotation canvases with zero page mounts, PDF renders or layer releases', motion.noPdfWork);
+      for (const collapsed of [true,false]) {
+        if (phone.view.rootEl.classList.contains('is-toolbar-collapsed') !== collapsed) { phone.view.toolbarToggleButton.click(); await delay(320); }
+        const navigated = await navigateWithInput(phone,collapsed ? 3 : 4);
+        const pageTop = phone.view.pages.get(phone.view.currentPage).shell.getBoundingClientRect().top;
+        check(`Phone page-input navigation stays below the ${collapsed?'collapsed':'expanded'} toolbar`, navigated && pageTop >= phone.view.toolbarEl.getBoundingClientRect().bottom);
+      }
+      if (phone.view.rootEl.classList.contains('is-toolbar-collapsed') !== motion.initiallyCollapsed) { phone.view.toolbarToggleButton.click(); await delay(320); }
+    }
+    phone.view.restorePage(4);
     phone.view.toggleOutline();
     check('Actual PDF table of contents renders eight hierarchical headings from the lower tools row', phone.view.outlineList.querySelectorAll('[role="treeitem"]').length===8 && phone.view.outlineEntries[1].depth===1 && phone.view.outlineButton.closest('.lumen-toolbar-actions'));
     phone.view.toggleOutline();
@@ -227,7 +367,7 @@ async function run() {
       const rect = renamed.view.scrollEl.getBoundingClientRect();
       return {x:rect.left+rect.width/2,y:rect.top+240,zoom:renamed.view.currentZoom(),fit:renamed.view.usesMobileFit()};
     };
-    window.harnessResult = { status:'passed', passed:checks.length, checks, annotationCount:2880, pageCount:12, browser: navigator.userAgent };
+    window.harnessResult = { status:'passed', passed:checks.length, checks, annotationCount:2880, pageCount:12, typography:window.harnessTypography, toolbarMotion:window.harnessToolbarMotion, browser: navigator.userAgent };
     document.querySelector('#status').textContent = `${checks.length} browser integration checks passed. The remaining mobile reader is interactive.`;
   } catch(error) {
     window.harnessResult = {status:'failed',passed:checks.length,checks,error:error.stack};

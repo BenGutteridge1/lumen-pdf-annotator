@@ -332,7 +332,7 @@ test('cancellation from the final preview callback cannot commit afterward', () 
   assert.equal(scheduler.frames.size + scheduler.timers.size, 0);
 });
 
-function renderer({ mobile = false, count = 10, ViewClass } = {}) {
+function renderer({ mobile = false, count = 10, ViewClass, roundedOffsets = false } = {}) {
   const { scheduler, doc } = environment();
   const contentEl = new ElementFixture(doc);
   const View = ViewClass ?? (mobile ? MobilePdfView : LumenPdfView);
@@ -368,7 +368,10 @@ function renderer({ mobile = false, count = 10, ViewClass } = {}) {
       const left = 100 + 32 + Math.max(0, (836 - width) / 2) - scrollEl.scrollLeft;
       return { top, left, width, height, right: left + width, bottom: top + height };
     };
-    Object.defineProperty(shell, 'offsetTop', { get: () => 58 + (pageNumber - 1) * (800 * liveZoom() + 18) });
+    Object.defineProperty(shell, 'offsetTop', { get: () => {
+      const top = 58 + (pageNumber - 1) * (800 * liveZoom() + 18);
+      return roundedOffsets ? Math.round(top) : top;
+    } });
     const state = { pageNumber, shell, stage: null, canvasHost: null, searchHost: null, textHost: null, markHost: null,
       mounted: false, rendering: false, canvasReady: false, canvasDetailReady: false, textReady: false,
       textRendering: false, wanted: false, visibleRatio: 0, renderedPixelRatio: 0,
@@ -377,6 +380,49 @@ function renderer({ mobile = false, count = 10, ViewClass } = {}) {
   }
   return { view, scheduler, scrollEl, rootEl, reads: () => reads };
 }
+
+test('mobile page navigation and current-page detection share stable clearance on short and notched viewports', () => {
+  for (const clearance of [68,81,128]) {
+    const { view, scrollEl } = renderer({mobile:true,count:20});
+    scrollEl.clientHeight = 480;
+    view.mobileDocumentClearance = clearance;
+    view.restorePage(7);
+    assert.equal(view.pages.get(7).shell.getBoundingClientRect().top - scrollEl.getBoundingClientRect().top, clearance);
+    view.updateCurrentPage();
+    assert.equal(view.currentPage, 7, 'the page input must not revert to the preceding page after navigation');
+    const anchor = view.captureReadingZoomAnchor();
+    assert.equal(anchor.page, 7);
+    assert.ok(anchor.viewportY >= clearance, 'zoom uses the same visible reading area');
+  }
+  const { view, scrollEl } = renderer();
+  view.restorePage(7);
+  assert.equal(view.pages.get(7).shell.getBoundingClientRect().top - scrollEl.getBoundingClientRect().top, 14,
+    'desktop keeps its existing navigation offset');
+});
+
+test('mobile page restore tolerates fractional scroll landing against rounded page offsets', () => {
+  const { view, scrollEl, rootEl } = renderer({mobile:true,count:20,roundedOffsets:true});
+  scrollEl.clientHeight = 680;
+  view.mobileDocumentClearance = 81;
+  // Real browser failure: page 4 rounds to 1543px, while a 1.5x display lands
+  // at scrollTop 1461.333px and the former reading boundary is 1542.933px.
+  rootEl.style.setProperty('--lumen-zoom', String((1542.75 - 112) / 2400));
+  const scrollTo = scrollEl.scrollTo.bind(scrollEl);
+  scrollEl.scrollTo = options => scrollTo({...options,top:Math.floor(options.top * 1.5) / 1.5});
+  view.restorePage(4);
+  const shell = view.pages.get(4).shell;
+  assert.equal(shell.offsetTop, 1543);
+  const formerBoundary = scrollEl.scrollTop + scrollEl.clientHeight * .12;
+  assert.ok(formerBoundary < shell.offsetTop && shell.offsetTop - formerBoundary < .1,
+    'fixture reproduces the observed sub-pixel boundary miss');
+  view.updateCurrentPage();
+  assert.equal(view.currentPage, 4);
+  assert.equal(view.pageInput.value, '4');
+  assert.equal(view.captureReadingZoomAnchor().page, 4);
+  scrollEl.scrollTop = shell.offsetTop - scrollEl.clientHeight * .12 - 1.1;
+  view.updateCurrentPage();
+  assert.equal(view.currentPage, 3, 'tolerance must remain limited to the one-pixel rounding boundary');
+});
 
 test('zoom controls preserve the current page and position within it on desktop and mobile', () => {
   for (const mobile of [false, true]) {
