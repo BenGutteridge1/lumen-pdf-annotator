@@ -1536,11 +1536,14 @@
 }
 .lumen-reader.is-mobile .lumen-toolbar:not(#lumen-specificity) .lumen-toolbar-toggle {
   flex-shrink: 0;
-  background: color-mix(in srgb, var(--lumen-accent) 8%, transparent);
+  background: transparent;
   color: var(--lumen-accent);
+  -webkit-tap-highlight-color: transparent;
 }
-.lumen-reader.is-mobile .lumen-toolbar:not(#lumen-specificity) .lumen-toolbar-toggle:hover {
-  background: color-mix(in srgb, var(--lumen-accent) 15%, transparent);
+.lumen-reader.is-mobile .lumen-toolbar:not(#lumen-specificity) .lumen-toolbar-toggle:hover,
+.lumen-reader.is-mobile .lumen-toolbar:not(#lumen-specificity) .lumen-toolbar-toggle:active,
+.lumen-reader.is-mobile .lumen-toolbar:not(#lumen-specificity) .lumen-toolbar-toggle:focus {
+  background: transparent;
 }
 .lumen-reader.is-mobile .lumen-toolbar:not(#lumen-specificity) .lumen-icon-button {
   width: 44px;
