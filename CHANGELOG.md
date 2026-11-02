@@ -2,6 +2,10 @@
 
 All notable changes to Lumen PDF Annotator are documented here.
 
+## 1.0.31 — 2026-11-02
+
+- Use explicit flex wrappers and grid gaps for the mobile toolbar to resolve CSS compatibility warnings while preserving the compact phone layout and the existing tablet and desktop controls.
+
 ## 1.0.30 — 2026-11-02
 
 - Add a compact phone toolbar with 26px controls, a 67px expanded height, and a 38px collapsed height. The themed chevron smoothly hides or reveals the lower tools row, including the table of contents, while page navigation and the zoom percentage stay available. Desktop and tablet toolbars retain their existing layouts.

@@ -1496,7 +1496,12 @@
 }
 .lumen-reader.is-mobile .lumen-toolbar-primary,
 .lumen-reader.is-mobile .lumen-toolbar-secondary {
-  display: contents;
+  display: flex;
+  flex-shrink: 0;
+}
+.lumen-reader.is-mobile .lumen-toolbar-primary {
+  align-items: center;
+  gap: 6px;
 }
 .lumen-reader.is-mobile .lumen-toolbar-toggle {
   display: none;
@@ -1579,6 +1584,7 @@
     align-items: center;
     justify-content: space-between;
     width: 100%;
+    gap: 0;
   }
   .lumen-reader.is-mobile .lumen-toolbar-secondary {
     display: grid;
@@ -1622,7 +1628,7 @@
   .lumen-reader.is-mobile .lumen-page-group,
   .lumen-reader.is-mobile .lumen-zoom-group {
     grid-template-columns: 26px auto 26px;
-    column-gap: 2px;
+    gap: 2px;
   }
   .lumen-reader.is-mobile .lumen-zoom-group {
     padding-left: 0;
