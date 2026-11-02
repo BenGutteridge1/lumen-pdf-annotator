@@ -1467,7 +1467,13 @@
   scroll-padding-top: calc(var(--lumen-mobile-toolbar-height) + env(safe-area-inset-top, 0px));
   touch-action: pan-x pan-y;
   -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
   transition: padding-top var(--lumen-toolbar-motion), scroll-padding-top var(--lumen-toolbar-motion);
+}
+.lumen-reader.is-mobile .lumen-scroll::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
 }
 .lumen-reader.is-mobile .lumen-pages {
   gap: 12px;
