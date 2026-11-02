@@ -5,11 +5,37 @@
 body{margin:24px}h1{font-size:23px;margin:0 0 12px}p{max-width:920px;color:#667085}button{cursor:pointer;font:inherit}#run{padding:10px 18px;background:#6955dc;color:white;border:0;border-radius:8px}#status{font-weight:600;padding:12px 0}#results{padding-left:24px;line-height:1.8}#readers{display:flex;gap:20px;align-items:start;flex-wrap:wrap}.reader-frame{position:relative;width:390px;height:680px;background:white;border:1px solid #ccd3e0;border-radius:12px;overflow:hidden}.reader-frame.desktop{width:780px}.view-content{width:100%;height:100%;padding:0}input,select,button{font:inherit}.check-pass{color:#146c35}.check-fail{color:#b42318}
 </style>
 <h1>Lumen mobile integration checks</h1>
-<p>Exercises the actual reader, bundled PDF.js worker, annotation storage and reading-state manager in a browser host. Uses an original synthetic 12-page PDF and 2,880 desktop-format annotations. The two readers have separate plugin settings and share only normal vault files.</p>
+<p>Exercises the actual reader, bundled PDF.js worker, annotation storage and reading-state manager in a browser host. Uses an original synthetic 12-page PDF with a hierarchical table of contents and 2,880 desktop-format annotations. The two readers have separate plugin settings and share only normal vault files.</p>
+<label>Default mobile toolbar <select id="toolbar-default"><option value="expanded">Expanded</option><option value="collapsed">Collapsed</option></select></label>
+<p id="toolbar-default-description"></p>
 <button id="run">Run mobile checks</button><div id="status">Ready</div><ol id="results"></ol><div id="readers"></div>
 <p>After the checks pass, the remaining phone reader accepts real two-finger touch gestures. Pinch inside its PDF content, then use the toolbar reset button to restore fit-to-width. One finger still scrolls and tapping a mark opens its editor.</p>
 <script src="harness.js"></script><script>
-const { LumenPdfView, PdfViewStateManager, ReadingPositionStore, Platform, TFile } = LumenHarness;
+const { LumenPdfView, PdfViewStateManager, ReadingPositionStore, LumenSettingTab, Platform, TFile } = LumenHarness;
+const harnessParams = new URLSearchParams(location.search);
+const persistentToolbar = harnessParams.get('persist') === '1';
+const harnessSettingsKey = 'lumen-harness:settings';
+let savedHarnessSettings = {};
+try { if (persistentToolbar) savedHarnessSettings = JSON.parse(localStorage.getItem(harnessSettingsKey) || '{}'); } catch { /* fresh test settings */ }
+const initialDefault = harnessParams.get('default') ?? savedHarnessSettings.mobileToolbarDefault;
+const settingsHost = {
+  app: {},
+  settings: { mobileToolbarDefault: initialDefault === 'collapsed' ? 'collapsed' : 'expanded' },
+  saveSettings: async () => { if (persistentToolbar) localStorage.setItem(harnessSettingsKey, JSON.stringify(settingsHost.settings)); },
+};
+window.harnessSettings = settingsHost.settings;
+window.harnessSettingTab = new LumenSettingTab(settingsHost);
+const toolbarSetting = harnessSettingTab.getSettingDefinitions().find(item => item.control?.key === 'mobileToolbarDefault');
+document.querySelector('#toolbar-default-description').textContent = toolbarSetting.desc;
+document.querySelector('#toolbar-default').value = settingsHost.settings.mobileToolbarDefault;
+window.setHarnessToolbarDefault = async value => {
+  await harnessSettingTab.setControlValue('mobileToolbarDefault', value);
+  document.querySelector('#toolbar-default').value = harnessSettingTab.getControlValue('mobileToolbarDefault');
+};
+document.querySelector('#toolbar-default').addEventListener('change', event => setHarnessToolbarDefault(event.target.value));
+window.resetHarnessToolbarState = () => {
+  for (const key of Object.keys(localStorage)) if (key.startsWith('lumen-harness:')) localStorage.removeItem(key);
+};
 const canvasHistory = [];
 function element(tag, options = {}, parent) {
   const node = document.createElement(tag);
@@ -23,6 +49,7 @@ function element(tag, options = {}, parent) {
 HTMLElement.prototype.createEl = function(tag, options) { return element(tag, options, this); };
 HTMLElement.prototype.createDiv = function(options) { return element('div', options, this); };
 HTMLElement.prototype.createSpan = function(options) { return element('span', options, this); };
+DocumentFragment.prototype.createEl = HTMLElement.prototype.createEl;
 HTMLElement.prototype.empty = function() { this.replaceChildren(); };
 HTMLElement.prototype.addClass = function(...classes) { this.classList.add(...classes); };
 HTMLElement.prototype.removeClass = function(...classes) { this.classList.remove(...classes); };
@@ -41,15 +68,37 @@ function touch(target, name, points) {
 function pdfBytes(count = 12) {
   const objects = [];
   const font = 3 + count * 2;
-  objects.push('<< /Type /Catalog /Pages 2 0 R >>');
+  const outlineRoot = font + 1;
+  const outlineRef = index => `${font + 2 + index} 0 R`;
+  const outline = [
+    { title:'Getting started', page:1, children:[1,2], next:3 },
+    { title:'Navigation and zoom', page:2, parent:0, next:2 },
+    { title:'Finding text', page:3, parent:0, previous:1 },
+    { title:'Working with annotations', page:5, children:[4,5], previous:0, next:6 },
+    { title:'Highlights and notes', page:6, parent:3, next:5 },
+    { title:'Reviewing annotations', page:8, parent:3, previous:4 },
+    { title:'Reading across devices', page:10, children:[7], previous:3 },
+    { title:'Restore your place', page:11, parent:6 },
+  ];
+  const titles = new Map(outline.map(entry => [entry.page, entry.title]));
+  objects.push(`<< /Type /Catalog /Pages 2 0 R /Outlines ${outlineRoot} 0 R >>`);
   objects.push(`<< /Type /Pages /Kids [${Array.from({length:count},(_,i)=>`${3+i*2} 0 R`).join(' ')}] /Count ${count} >>`);
   for (let i = 0; i < count; i++) {
     const page = 3 + i * 2;
-    const content = `BT /F1 18 Tf 50 720 Td (Lumen mobile test - page ${i+1}) Tj 0 -34 Td (Synthetic original document for annotation and sync checks.) Tj ET`;
+    const heading = titles.get(i+1) ?? `Reading example ${i+1}`;
+    const content = `BT /F1 18 Tf 50 720 Td (Lumen mobile test - page ${i+1}) Tj 0 -34 Td (${heading}) Tj /F1 12 Tf 0 -28 Td (Synthetic original document for annotation and sync checks.) Tj ET`;
     objects.push(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 ${font} 0 R >> >> /Contents ${page+1} 0 R >>`);
     objects.push(`<< /Length ${content.length} >>\nstream\n${content}\nendstream`);
   }
   objects.push('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>');
+  objects.push(`<< /Type /Outlines /First ${outlineRef(0)} /Last ${outlineRef(6)} /Count ${outline.length} >>`);
+  for (const entry of outline) {
+    const parent = entry.parent === undefined ? `${outlineRoot} 0 R` : outlineRef(entry.parent);
+    const siblings = `${entry.previous === undefined ? '' : `/Prev ${outlineRef(entry.previous)}`} ${entry.next === undefined ? '' : `/Next ${outlineRef(entry.next)}`}`;
+    const children = entry.children ? `/First ${outlineRef(entry.children[0])} /Last ${outlineRef(entry.children.at(-1))} /Count ${entry.children.length}` : '';
+    const page = 3 + (Math.min(count, entry.page) - 1) * 2;
+    objects.push(`<< /Title (${entry.title}) /Parent ${parent} ${siblings} ${children} /Dest [${page} 0 R /XYZ null 720 null] >>`);
+  }
   let source = '%PDF-1.4\n'; const offsets = [0];
   objects.forEach((value, i) => { offsets.push(source.length); source += `${i+1} 0 obj\n${value}\nendobj\n`; });
   const xref = source.length;
@@ -71,34 +120,47 @@ async function run() {
     const files = new Map();
     const vault = { adapter: { exists: async path => files.has(path), read: async path => { if (!files.has(path)) throw Error(`Missing ${path}`); return files.get(path); }, write: async (path,text) => files.set(path,text), mkdir: async path => files.set(path,''), append: async (path,text) => files.set(path,(files.get(path)||'')+text), list: async path => ({files:[...files.keys()].filter(file=>file.startsWith(`${path}/`)),folders:[]}) }, readBinary: async () => bytes.slice(0), getName: () => 'Synthetic test vault' };
     const localZoom = {desktop:new Map(),mobile:new Map()};
-    const localStorageFor = mobile => ({getItem:key=>localZoom[mobile?'mobile':'desktop'].get(key)??null,setItem:(key,value)=>localZoom[mobile?'mobile':'desktop'].set(key,value)});
+    const persistentKey = key => persistentToolbar && key.startsWith('lumen-pdf-annotator:mobile-toolbar:');
+    const localStorageFor = mobile => ({
+      getItem:key=>persistentKey(key)?localStorage.getItem(`lumen-harness:${key}`):localZoom[mobile?'mobile':'desktop'].get(key)??null,
+      setItem:(key,value)=>persistentKey(key)?localStorage.setItem(`lumen-harness:${key}`,value):localZoom[mobile?'mobile':'desktop'].set(key,value),
+    });
     const records = Array.from({length:2880}, (_, i) => ({ id:`desktop-${i}`,kind:i%19===0?'page-note':'text',page:Math.floor(i/240)+1,rects:[{x:.08+(i%5)*.17,y:.16+Math.floor((i%240)/5)*.014,width:.14,height:.009}],quote:`Saved desktop quote ${i}: punctuation [ ] { }, " \\`,note:`Saved note ${i}`,tags:['test'],color:['#ffd12d','#83cb67','#6f9fe8'][i%3],style:['highlight','underline','dashed','dotted','strike','box','comment'][i%7],createdAt:i+1,updatedAt:i+1 }));
     const snapshotPath = `.lumen-pdf/bundles/sha256/${hash}/annotations.snapshot.json`;
     files.set(snapshotPath, JSON.stringify(records));
-    async function reader(mobile, pluginData = {}, path = 'Synthetic.pdf') {
+    async function reader(mobile, pluginData = {}, path = 'Synthetic.pdf', pdfSource = bytes) {
       Platform.isMobile = mobile;
       const frame = element('div', { cls:`reader-frame ${mobile?'mobile':'desktop'}` }, document.querySelector('#readers'));
       const contentEl = frame.createDiv({cls:'view-content'});
-      const app = { vault, scope: {}, workspace: { getLeavesOfType: () => active.map(item => item.leaf) } };
+      const readerVault = { ...vault, readBinary: async () => pdfSource.slice(0) };
+      const app = { vault: readerVault, scope: {}, workspace: { getLeavesOfType: () => active.map(item => item.leaf) } };
       const leaf = { app, contentEl, containerEl: frame };
       let data = pluginData;
       const manager = new PdfViewStateManager({ app, loadData: async () => data }, localStorageFor(mobile));
       await manager.load();
-      const view = new LumenPdfView(leaf, 'light', undefined, 'PDF annotations', false, () => manager.attach(leaf));
-      leaf.view = view; view.file = new TFile(path, bytes.byteLength);
+      const view = new LumenPdfView(leaf, 'light', undefined, 'PDF annotations', false, () => manager.attach(leaf), undefined, {
+        restore: hash => manager.toolbar.resolve(hash, settingsHost.settings.mobileToolbarDefault === 'collapsed'),
+        save: (hash, collapsed) => manager.toolbar.save(hash, collapsed),
+      });
+      leaf.view = view; view.file = new TFile(path, pdfSource.byteLength);
       const item = { view, manager, leaf, frame, data: () => data };
       active.push(item); await view.onOpen(); await view.onLoadFile(view.file);
       await until(() => manager.activeCaptures.has(view.rootEl));
       await until(() => view.pages.get(view.currentPage)?.canvasReady);
+      await until(() => view.outlineEntries.length === 8 && !view.outlineButton.hidden);
       return item;
     }
     async function close(item) { await item.manager.flush(); await item.view.onClose(); item.view.cleanups.forEach(fn=>fn()); item.frame.remove(); }
     window.closeHarnessReader = close;
+    window.openHarnessPdf = (path = 'Different.pdf', pageCount = 13) => reader(true, {}, path, pdfBytes(pageCount));
     const desktop = await reader(false);
     desktop.view.restorePage(4); await desktop.view.restoreZoom(1.37); await desktop.manager.flush();
     check('Desktop opens the annotated PDF and writes page 4 into its hidden bundle JSON', desktop.view.index.size===2880 && (await new ReadingPositionStore(vault,desktop.manager.deviceId).read(hash)).page===4);
     const phone = await reader(true);
     check('Independent phone restores desktop page 4 and keeps fit-to-width zoom', phone.view.currentPage===4 && phone.view.usesMobileFit() && phone.view.currentZoom()<1.37);
+    phone.view.toggleOutline();
+    check('Actual PDF table of contents renders eight hierarchical headings from the lower tools row', phone.view.outlineList.querySelectorAll('[role="treeitem"]').length===8 && phone.view.outlineEntries[1].depth===1 && phone.view.outlineButton.closest('.lumen-toolbar-actions'));
+    phone.view.toggleOutline();
     await until(() => phone.view.pages.get(4)?.markHost?.querySelector('canvas'));
     const state = phone.view.pages.get(4);
     const dense = state.markHost.querySelector('canvas');

@@ -2,6 +2,12 @@
 
 All notable changes to Lumen PDF Annotator are documented here.
 
+## 1.0.30 — 2026-11-02
+
+- Add a compact phone toolbar with 26px controls, a 67px expanded height, and a 38px collapsed height. The themed chevron smoothly hides or reveals the lower tools row, including the table of contents, while page navigation and the zoom percentage stay available. Desktop and tablet toolbars retain their existing layouts.
+- Add **Default mobile toolbar** with Expanded and Collapsed options. Remember each PDF's last toolbar state immediately on this device, including across Obsidian restarts and PDF renames or moves; saved states take precedence over the default without adding vault sync files.
+- Hide the mobile PDF scrollbar while preserving native touch scrolling, and keep the toggle background clear during taps, hover, and focus. Keyboard focus indicators and reduced-motion preferences remain supported.
+
 ## 1.0.29 — 2026-10-29
 
 - Store each device's reading position in its own `reading-position.<device-id>.json` file inside each PDF bundle. Devices read the newest synced page while writing separate files, preventing Git merge conflicts on the shared position file. Keep reading 1.0.28's shared JSON and older Markdown/plugin-state positions for migration.

@@ -20,6 +20,7 @@ import {
 } from "./outline";
 import { DocumentBundle, LegacyAnnotationRecord, loadLegacyAnnotations, openBundle } from "./storage";
 import type { AnnotationSearchSource } from "./annotation-search-index";
+import type { MobileToolbarPreferences } from "./toolbar-state";
 
 export const LUMEN_VIEW_TYPE = "lumen-pdf-view";
 export type PdfTheme = "light" | "sepia" | "dark";
@@ -194,6 +195,7 @@ function iconButton(icon: string, label: string, onClick: () => void): HTMLButto
 }
 
 let outlineHeadingSequence = 0;
+let toolbarActionsSequence = 0;
 
 function normalizeSearchText(value: string): NormalizedSearchText {
   let text = "";
@@ -264,6 +266,10 @@ export class LumenPdfView extends FileView {
   private scrollEl!: HTMLElement;
   private pagesEl!: HTMLElement;
   private toolbarEl!: HTMLElement;
+  private toolbarActionsEl: HTMLElement | null = null;
+  private toolbarToggleButton: HTMLButtonElement | null = null;
+  private mobileToolbarMediaQuery: MediaQueryList | null = null;
+  private mobileToolbarCollapsed = false;
   private searchPanel!: HTMLElement;
   private searchInput!: HTMLInputElement;
   private searchResults!: HTMLElement;
@@ -358,6 +364,7 @@ export class LumenPdfView extends FileView {
     private readonly automaticPdfBackups = false,
     private readonly onReaderReady?: () => void,
     private readonly onAnnotationsChanged?: (source: AnnotationSearchSource) => void,
+    private readonly toolbarPreferences?: MobileToolbarPreferences,
   ) {
     super(leaf);
     this.theme = initialTheme;
@@ -435,7 +442,14 @@ export class LumenPdfView extends FileView {
     }, true);
     this.registerDomEvent(doc, "focusin", () => this.startMobileKeyboardProbe());
     this.registerDomEvent(doc, "focusout", () => this.startMobileKeyboardProbe());
-    if (viewWindow) this.registerDomEvent(viewWindow, "resize", () => this.scheduleMobileViewportUpdate(40));
+    if (viewWindow) {
+      this.registerDomEvent(viewWindow, "resize", () => this.scheduleMobileViewportUpdate(40));
+      const tabletLayout = viewWindow.matchMedia("(min-width: 600px)");
+      this.mobileToolbarMediaQuery = tabletLayout;
+      const updateToolbar = () => this.updateMobileToolbarState();
+      tabletLayout.addEventListener("change", updateToolbar);
+      this.register(() => tabletLayout.removeEventListener("change", updateToolbar));
+    }
     const viewport = viewWindow?.visualViewport;
     if (viewport) {
       const update = () => this.scheduleMobileViewportUpdate(24);
@@ -484,6 +498,7 @@ export class LumenPdfView extends FileView {
       this.pdfWorker = loaded.worker;
       this.workerPort = loaded.port;
       this.documentHash = bundle.hash;
+      this.mobileToolbarCollapsed = this.mobileRuntime ? this.toolbarPreferences?.restore(bundle.hash) ?? false : false;
       this.buildShell(file);
       await this.buildPages(generation);
       if (generation !== this.documentGeneration) return;
@@ -818,8 +833,11 @@ export class LumenPdfView extends FileView {
 
   private buildToolbar(file: TFile): void {
     this.toolbarEl.setAttribute("aria-label", `${file.name} PDF controls`);
+    const primary = this.mobileRuntime
+      ? this.toolbarEl.createDiv({ cls: "lumen-toolbar-primary" })
+      : this.toolbarEl;
 
-    const pageGroup = this.toolbarEl.createDiv({ cls: "lumen-control-group lumen-page-group" });
+    const pageGroup = primary.createDiv({ cls: "lumen-control-group lumen-page-group" });
     pageGroup.append(iconButton("chevron-left", "Previous page", () => this.previousPage()));
     const pageIndicator = pageGroup.createDiv({ cls: "lumen-page-indicator" });
     const pageInput = pageIndicator.createEl("input", {
@@ -838,12 +856,29 @@ export class LumenPdfView extends FileView {
     const pageTotal = pageIndicator.createSpan({ cls: "lumen-page-total", text: "–" });
     pageGroup.append(iconButton("chevron-right", "Next page", () => this.nextPage()));
 
-    const zoomGroup = this.toolbarEl.createDiv({ cls: "lumen-control-group lumen-zoom-group" });
+    const zoomGroup = primary.createDiv({ cls: "lumen-control-group lumen-zoom-group" });
     zoomGroup.append(iconButton("minus", "Zoom out", () => this.zoomOut()));
     const zoomLabel = zoomGroup.createSpan({ cls: "lumen-zoom-label", text: `${Math.round(this.zoom * 100)}%` });
     zoomGroup.append(iconButton("plus", "Zoom in", () => this.zoomIn()));
 
-    const actions = this.toolbarEl.createDiv({ cls: "lumen-toolbar-actions" });
+    const secondary = this.mobileRuntime
+      ? this.toolbarEl.createDiv({ cls: "lumen-toolbar-secondary" })
+      : this.toolbarEl;
+    const actions = secondary.createDiv({ cls: "lumen-toolbar-actions" });
+    if (this.mobileRuntime) {
+      actions.id = `lumen-toolbar-actions-${++toolbarActionsSequence}`;
+      this.toolbarActionsEl = actions;
+      this.toolbarToggleButton = iconButton("chevron-up", "Hide PDF tools", () => {
+        this.mobileToolbarCollapsed = !this.mobileToolbarCollapsed;
+        if (this.documentHash) this.toolbarPreferences?.save(this.documentHash, this.mobileToolbarCollapsed);
+        this.updateMobileToolbarState();
+      });
+      this.toolbarToggleButton.type = "button";
+      this.toolbarToggleButton.addClass("lumen-toolbar-toggle");
+      this.toolbarToggleButton.setAttribute("aria-controls", actions.id);
+      primary.append(this.toolbarToggleButton);
+      this.updateMobileToolbarState();
+    }
     actions.append(iconButton("search", "Search PDF", () => this.toggleSearch()));
     this.outlineButton = iconButton("list-tree", "Table of contents", () => this.toggleOutline());
     this.outlineButton.removeAttribute("aria-label");
@@ -864,6 +899,22 @@ export class LumenPdfView extends FileView {
     this.pageInput = pageInput;
     this.pageTotal = pageTotal;
     this.zoomLabel = zoomLabel;
+  }
+
+  private updateMobileToolbarState(): void {
+    const button = this.toolbarToggleButton;
+    const actions = this.toolbarActionsEl;
+    if (!button || !actions) return;
+    // Remember the phone preference while a tablet layout exposes all tools.
+    const collapsed = this.mobileToolbarCollapsed && this.mobileToolbarMediaQuery?.matches === false;
+    if (collapsed && actions.contains(this.containerEl.ownerDocument.activeElement)) button.focus({ preventScroll: true });
+    this.rootEl.classList.toggle("is-toolbar-collapsed", collapsed);
+    button.setAttribute("aria-expanded", String(!collapsed));
+    const label = collapsed ? "Show PDF tools" : "Hide PDF tools";
+    button.setAttribute("aria-label", label);
+    button.title = label;
+    actions.inert = collapsed;
+    actions.setAttribute("aria-hidden", String(collapsed));
   }
 
   private buildSearchPanel(): void {
@@ -3753,6 +3804,8 @@ export class LumenPdfView extends FileView {
     this.pageNoteButton = null;
     this.outlineButton = null;
     this.themeButton = null;
+    this.toolbarActionsEl = null;
+    this.toolbarToggleButton = null;
     this.outlineEntries = [];
     this.pageTextCache.clear();
     this.pageTextCacheChars = 0;

@@ -1,6 +1,7 @@
 import { Plugin, WorkspaceLeaf } from "obsidian";
 import { LumenPdfView, LUMEN_VIEW_TYPE } from "./view";
 import { newerPosition, readingPosition, ReadingPosition, ReadingPositionStore } from "./reading-position";
+import { LocalStateStorage, PdfToolbarStateStore } from "./toolbar-state";
 
 interface PdfZoomState {
   zoom: number;
@@ -15,11 +16,6 @@ interface PdfViewStateData {
 interface PluginDataWithViewState {
   pdfViewState?: { pdfs?: Record<string, unknown> };
   [key: string]: unknown;
-}
-
-interface LocalStateStorage {
-  getItem(key: string): string | null;
-  setItem(key: string, value: string): void;
 }
 
 const SAVE_DELAY_MS = 450;
@@ -87,6 +83,7 @@ export class PdfViewStateManager {
   private readonly localStorage: LocalStateStorage | null;
   private readonly localStateKey: string;
   readonly deviceId: string;
+  readonly toolbar: PdfToolbarStateStore;
 
   constructor(private readonly plugin: Plugin, localStorage?: LocalStateStorage | null) {
     this.localStorage = localStorage === undefined ? browserLocalStorage() : localStorage;
@@ -94,6 +91,7 @@ export class PdfViewStateManager {
     this.positionStore = plugin.app?.vault ? new ReadingPositionStore(plugin.app.vault, this.deviceId) : null;
     const vaultName = plugin.app?.vault?.getName?.() ?? "default";
     this.localStateKey = `${LOCAL_STATE_KEY}:${encodeURIComponent(vaultName)}`;
+    this.toolbar = new PdfToolbarStateStore(vaultName, this.localStorage);
   }
 
   async load(): Promise<void> {
