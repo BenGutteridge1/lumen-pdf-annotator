@@ -8,6 +8,7 @@ import { AnnotationBundleInfo, BundleInfo, exportAnnotationBundle, listAnnotatio
 import { LumenPdfView, LUMEN_VIEW_TYPE, PdfTheme } from "./view";
 import { PdfViewStateManager } from "./view-state";
 import { isSharedReadingStatePath } from "./reading-position";
+import { annotationColour, ANNOTATION_COLOUR_NAMES, DEFAULT_ANNOTATION_COLOUR, VAULT_ANNOTATION_COLOUR_PATH, VaultAnnotationColour } from "./annotation-colour";
 
 interface LumenSettings {
   defaultViewer: boolean;
@@ -53,11 +54,13 @@ export default class LumenPdfPlugin extends Plugin {
   private dataWrite: Promise<void> = Promise.resolve();
   private viewState!: PdfViewStateManager;
   private annotationSearch!: AnnotationSearchIndex;
+  annotationColour!: VaultAnnotationColour;
 
   async onload(): Promise<void> {
     this.settings = readSettings(await this.loadData() as unknown);
     this.viewState = new PdfViewStateManager(this);
-    await this.viewState.load();
+    this.annotationColour = new VaultAnnotationColour(this.app.vault);
+    await Promise.all([this.viewState.load(), this.annotationColour.load()]);
     this.annotationSearch = new AnnotationSearchIndex(this.app, () => {
       const sources: AnnotationSearchSource[] = [];
       for (const leaf of this.app.workspace.getLeavesOfType(LUMEN_VIEW_TYPE)) {
@@ -82,6 +85,7 @@ export default class LumenPdfPlugin extends Plugin {
         restore: hash => this.viewState.toolbar.resolve(hash, this.settings.mobileToolbarDefault === "collapsed"),
         save: (hash, collapsed) => this.viewState.toolbar.save(hash, collapsed),
       },
+      this.annotationColour,
     ));
     if (this.settings.defaultViewer) this.installAsDefaultPdfViewer();
     this.registerObsidianProtocolHandler(LUMEN_PROTOCOL_ACTION, params => void this.openAnnotationLink(params).catch(error => {
@@ -126,14 +130,24 @@ export default class LumenPdfPlugin extends Plugin {
     }));
     this.registerDomEvent(document, "visibilitychange", () => {
       if (document.hidden) void this.viewState.flush().catch(error => console.warn("Lumen could not save PDF reading state before backgrounding", error));
-      else this.viewState.attachAll();
+      else {
+        this.viewState.attachAll();
+        void this.annotationColour.load();
+      }
     });
     // GitSync can finish its pull after the app returns to the foreground.
     const refreshSyncedPage = (file: TFile) => {
       if (isSharedReadingStatePath(file.path)) this.viewState.attachAll();
+      if (file.path === VAULT_ANNOTATION_COLOUR_PATH) void this.annotationColour.load();
     };
     this.registerEvent(this.app.vault.on("modify", refreshSyncedPage));
     this.registerEvent(this.app.vault.on("create", file => { if (file instanceof TFile) refreshSyncedPage(file); }));
+    this.registerEvent(this.app.vault.on("delete", file => {
+      if (file.path === VAULT_ANNOTATION_COLOUR_PATH) void this.annotationColour.load();
+    }));
+    this.registerEvent(this.app.vault.on("rename", (file, oldPath) => {
+      if (file.path === VAULT_ANNOTATION_COLOUR_PATH || oldPath === VAULT_ANNOTATION_COLOUR_PATH) void this.annotationColour.load();
+    }));
     window.setTimeout(() => this.viewState.attachAll(), 0);
     this.annotationSearch.start();
   }
@@ -315,6 +329,11 @@ export class LumenSettingTab extends PluginSettingTab {
         control: { type: "dropdown", key: "pdfTheme", options: { light: "Light", sepia: "Sepia", dark: "Dark" }, defaultValue: DEFAULT_SETTINGS.pdfTheme },
       },
       {
+        name: "Default annotation colour",
+        desc: "Use this colour until a PDF has a colour of its own. This setting is shared across the vault.",
+        control: { type: "dropdown", key: "defaultAnnotationColour", options: ANNOTATION_COLOUR_NAMES, defaultValue: DEFAULT_ANNOTATION_COLOUR },
+      },
+      {
         name: "Default mobile toolbar",
         desc: "Start new PDFs with the tools row expanded or collapsed. Each PDF remembers its last state on this device, including after Obsidian restarts.",
         control: { type: "dropdown", key: "mobileToolbarDefault", options: { expanded: "Expanded", collapsed: "Collapsed" }, defaultValue: DEFAULT_SETTINGS.mobileToolbarDefault },
@@ -354,6 +373,7 @@ export class LumenSettingTab extends PluginSettingTab {
   getControlValue(key: string): unknown {
     if (key === "defaultViewer") return this.plugin.settings.defaultViewer;
     if (key === "pdfTheme") return this.plugin.settings.pdfTheme;
+    if (key === "defaultAnnotationColour") return this.plugin.annotationColour.colour;
     if (key === "mobileToolbarDefault") return this.plugin.settings.mobileToolbarDefault;
     if (key === "legacyAnnotationFolder") return this.plugin.settings.legacyAnnotationFolder;
     if (key === "automaticPdfBackups") return this.plugin.settings.automaticPdfBackups;
@@ -368,6 +388,13 @@ export class LumenSettingTab extends PluginSettingTab {
       });
     }
     if (key === "pdfTheme" && isPdfTheme(value)) return this.plugin.setPdfTheme(value);
+    if (key === "defaultAnnotationColour") {
+      const colour = annotationColour(value);
+      if (colour) return this.plugin.annotationColour.save(colour).catch(error => {
+        console.error("Lumen could not save the vault annotation colour", error);
+        new Notice("Lumen could not save the default annotation colour.");
+      });
+    }
     if (key === "mobileToolbarDefault" && (value === "expanded" || value === "collapsed")) {
       this.plugin.settings.mobileToolbarDefault = value;
       return this.plugin.saveSettings();

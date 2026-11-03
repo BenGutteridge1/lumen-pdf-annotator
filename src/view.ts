@@ -8,7 +8,9 @@ import { annotationTarget, comparableFileName, QuoteAnnotationRecord, quoteAnnot
 import { loadPdf } from "./pdf-runtime";
 import { DesktopPdfZoom } from "./desktop-zoom";
 import { MobilePdfZoom } from "./mobile-zoom";
-import { PaletteRect, SELECTION_PALETTE_MARGIN, SelectionPageBounds, selectionPalettePosition, visibleSelectionPages } from "./selection-palette";
+import { mobileColourPickerPosition, PaletteRect, SELECTION_PALETTE_MARGIN, SelectionPageBounds, selectionPalettePosition, visibleSelectionPages } from "./selection-palette";
+import { AnnotationColour, AnnotationColourPreference, resolveAnnotationColour } from "./annotation-colour";
+import { mobileSelectionColours } from "./mobile-selection-colours";
 import {
   cacheOutlineHeadingLocation,
   centeredOutlineScrollTop,
@@ -113,9 +115,7 @@ interface PendingSelection {
   quoteRanges: Map<number, AnnotationQuoteRange[]>;
   quoteRangeVersions: Map<number, QuoteRangeVersion>;
   nativeRange: Range;
-  x: number;
-  y: number;
-  paletteBounds?: SelectionPageBounds[];
+  paletteBounds: SelectionPageBounds[];
 }
 
 interface ZoomAnchor {
@@ -317,6 +317,7 @@ export class LumenPdfView extends FileView {
   private selection: PendingSelection | null = null;
   private selectionPalette: HTMLElement | null = null;
   private selectionPaletteCleanup: (() => void) | null = null;
+  private selectionPaletteColourCleanup: (() => void) | null = null;
   private selectionPaletteRaf = 0;
   private suppressNextSelectionCapture = false;
   private extensionGroupId: string | null = null;
@@ -363,6 +364,7 @@ export class LumenPdfView extends FileView {
   private mobilePanelHeight = 0;
   private mobileKeyboardProbeTimer = 0;
   private mobileKeyboardProbeCount = 0;
+  private mobileSafeArea = { left: 0, right: 0, bottom: 0 };
 
   constructor(
     leaf: WorkspaceLeaf,
@@ -373,6 +375,7 @@ export class LumenPdfView extends FileView {
     private readonly onReaderReady?: () => void,
     private readonly onAnnotationsChanged?: (source: AnnotationSearchSource) => void,
     private readonly toolbarPreferences?: MobileToolbarPreferences,
+    private readonly vaultAnnotationColour?: AnnotationColourPreference,
   ) {
     super(leaf);
     this.theme = initialTheme;
@@ -448,8 +451,14 @@ export class LumenPdfView extends FileView {
       this.closeSelectionPalette();
       this.closeEditor();
     }, true);
-    this.registerDomEvent(doc, "focusin", () => this.startMobileKeyboardProbe());
-    this.registerDomEvent(doc, "focusout", () => this.startMobileKeyboardProbe());
+    const probeAfterTextFocus = (event: FocusEvent) => {
+      const target = event.target;
+      if (target instanceof HTMLElement && target.matches("input, textarea, [contenteditable=true]")) {
+        this.startMobileKeyboardProbe();
+      }
+    };
+    this.registerDomEvent(doc, "focusin", probeAfterTextFocus);
+    this.registerDomEvent(doc, "focusout", probeAfterTextFocus);
     if (viewWindow) {
       this.registerDomEvent(viewWindow, "resize", () => this.scheduleMobileViewportUpdate(40));
       const tabletLayout = viewWindow.matchMedia("(min-width: 600px)");
@@ -472,7 +481,7 @@ export class LumenPdfView extends FileView {
 
   onResize(): void {
     if (this.mobileRuntime) this.scheduleMobileViewportUpdate();
-    else this.scheduleSelectionPalettePosition();
+    this.scheduleSelectionPalettePosition();
   }
 
   async onClose(): Promise<void> {
@@ -799,7 +808,7 @@ export class LumenPdfView extends FileView {
       this.pagesEl.addEventListener("pointercancel", event => this.endMobileLongPress(event.pointerId));
       this.scrollEl.addEventListener("pointerup", event => {
         this.endMobileLongPress(event.pointerId);
-        this.scheduleMobileSelectionCapture(event.clientX, event.clientY, 40);
+        this.scheduleMobileSelectionCapture(40);
       }, { passive: true });
       this.pagesEl.addEventListener("keydown", event => {
         if (event.key !== "Enter" && event.key !== " ") return;
@@ -810,11 +819,11 @@ export class LumenPdfView extends FileView {
         this.openEditor(annotation, mark);
       });
     } else {
-      this.scrollEl.addEventListener("mouseup", event => {
+      this.scrollEl.addEventListener("mouseup", () => {
         // Pointerdown dismisses the old palette and clears its native range.
         // A noncollapsed range here therefore belongs to a fresh selection,
         // including a reverse drag over exactly the same text.
-        this.captureSelection(event.clientX, event.clientY);
+        this.captureSelection();
       });
     }
     this.scrollEl.addEventListener("scroll", () => {
@@ -1898,8 +1907,14 @@ export class LumenPdfView extends FileView {
     const doc = this.containerEl.ownerDocument;
     // Cache alongside the existing viewport reads, never during scrolling or
     // the toolbar animation. Safe-area insets can exceed the normal page anchor.
-    this.mobileDocumentClearance = Number.parseFloat(getComputedStyle(this.scrollEl).scrollPaddingTop) || 0;
     const viewWindow = doc.defaultView;
+    const scrollStyle = viewWindow?.getComputedStyle(this.scrollEl);
+    this.mobileDocumentClearance = Number.parseFloat(scrollStyle?.scrollPaddingTop ?? "") || 0;
+    this.mobileSafeArea = {
+      left: Math.max(0, (Number.parseFloat(scrollStyle?.paddingLeft ?? "") || 0) - 8),
+      right: Math.max(0, (Number.parseFloat(scrollStyle?.paddingRight ?? "") || 0) - 8),
+      bottom: Math.max(0, (Number.parseFloat(scrollStyle?.paddingBottom ?? "") || 0) - 24),
+    };
     const viewport = viewWindow?.visualViewport;
     const viewportWidth = viewport?.width ?? viewWindow?.innerWidth ?? this.rootEl.clientWidth;
     const reportedViewportHeight = viewport?.height ?? viewWindow?.innerHeight ?? this.rootEl.clientHeight;
@@ -1965,6 +1980,7 @@ export class LumenPdfView extends FileView {
     this.updateDetachedMobileSurface(this.selectionPalette ?? this.editor ?? this.rootEl);
     if (this.selectionPalette && this.editor) this.updateDetachedMobileSurface(this.editor);
     this.editor?.classList.toggle("has-mobile-keyboard", keyboardOpen);
+    this.scheduleSelectionPalettePosition();
     window.requestAnimationFrame(() => this.ensureMobileFocusedControlVisible());
   }
 
@@ -2007,7 +2023,7 @@ export class LumenPdfView extends FileView {
         this.cancelPageRender(state);
         this.cancelPendingTextLayer(state);
       }
-      if (this.bundle) void this.bundle.repository.flushJournal().catch(error => {
+      if (this.bundle) void Promise.all([this.bundle.repository.flushJournal(), this.bundle.flushAnnotationColour()]).catch(error => {
         console.error("Lumen could not flush annotations while the mobile app was backgrounded", error);
       });
       return;
@@ -2172,8 +2188,8 @@ export class LumenPdfView extends FileView {
     this.scrollEl.scrollTo({ top: Math.max(0, targetTop), behavior });
   }
 
-  private captureSelection(clientX?: number, clientY?: number): void {
-    if (this.desktopZoomPreview !== null) return;
+  private captureSelection(): void {
+    if (!this.bundle || this.desktopZoomPreview !== null) return;
     const nativeSelection = this.containerEl.ownerDocument.defaultView?.getSelection() ?? null;
     if (!nativeSelection || nativeSelection.isCollapsed || !nativeSelection.rangeCount) return;
     const range = nativeSelection.getRangeAt(0).cloneRange();
@@ -2227,10 +2243,7 @@ export class LumenPdfView extends FileView {
     if (!byPage.size) return;
     const quote = quoteRanges.size === byPage.size ? quoteFromPageRanges(quoteRanges) : rawQuote;
     if (!quote) return;
-    const selectionBounds = range.getBoundingClientRect();
-    const x = Number.isFinite(clientX) ? clientX! : selectionBounds.left + selectionBounds.width / 2;
-    const y = Number.isFinite(clientY) ? clientY! : selectionBounds.bottom;
-    const paletteBounds = this.mobileRuntime ? undefined : Array.from(byPage, ([page, fragments]) => {
+    const paletteBounds = Array.from(byPage, ([page, fragments]) => {
       const bounds = { page, left: 1, top: 1, right: 0, bottom: 0 };
       for (const rect of fragments) {
         bounds.left = Math.min(bounds.left, rect.x);
@@ -2240,7 +2253,7 @@ export class LumenPdfView extends FileView {
       }
       return bounds;
     });
-    this.selection = { quote, pages: byPage, quoteRanges, quoteRangeVersions, nativeRange: range, x, y, paletteBounds };
+    this.selection = { quote, pages: byPage, quoteRanges, quoteRangeVersions, nativeRange: range, paletteBounds };
     if (this.extensionGroupId) this.showExtensionPalette();
     else this.showSelectionPalette();
   }
@@ -2279,7 +2292,7 @@ export class LumenPdfView extends FileView {
       && end.closest(".lumen-text-layer"));
   }
 
-  private scheduleMobileSelectionCapture(clientX?: number, clientY?: number, delay = 170): void {
+  private scheduleMobileSelectionCapture(delay = 170): void {
     if (Date.now() < this.mobilePinchSuppressUntil) return;
     if (!this.mobileRuntime || !this.rootEl?.isConnected) return;
     window.clearTimeout(this.selectionChangeTimer);
@@ -2302,7 +2315,7 @@ export class LumenPdfView extends FileView {
       if (this.selectionPalette && captured
         && range.startContainer === captured.startContainer && range.startOffset === captured.startOffset
         && range.endContainer === captured.endContainer && range.endOffset === captured.endOffset) return;
-      this.captureSelection(clientX, clientY);
+      this.captureSelection();
     }, delay);
   }
 
@@ -2393,38 +2406,60 @@ export class LumenPdfView extends FileView {
       palette.setAttribute("aria-label", "PDF annotation tools");
     }
     this.selectionPalette = palette;
-    let pendingColor: string = MARK_COLORS[0];
-    const colorChips: HTMLButtonElement[] = [];
-    const colors = palette.createDiv({ cls: "lumen-color-row" });
-    for (const color of MARK_COLORS) {
-      const chip = colors.createEl("button", { cls: "lumen-color-chip", attr: { "aria-label": `Choose ${color}` } });
-      chip.dataset.color = color;
-      chip.style.setProperty("--mark-color", color);
-      chip.classList.toggle("is-active", color === pendingColor);
-      chip.setAttribute("aria-pressed", String(color === pendingColor));
-      chip.addEventListener("click", event => {
-        event.stopPropagation();
-        pendingColor = color;
-        for (const item of colorChips) {
-          const active = item === chip;
-          item.classList.toggle("is-active", active);
-          item.setAttribute("aria-pressed", String(active));
-        }
+    const bundle = this.bundle;
+    const chooseColour = (colour: AnnotationColour) => this.rememberAnnotationColour(colour);
+    let displayColour: (colour: AnnotationColour) => void;
+    if (this.mobileRuntime) {
+      palette.addClass("lumen-mobile-annotation-palette");
+      // Avoid focusing a button on tap so iOS can keep the native selection.
+      // The picker still handles touch scrolling and keyboard focus normally.
+      palette.addEventListener("mousedown", event => event.preventDefault());
+      displayColour = mobileSelectionColours(palette, chooseColour, () => this.scheduleSelectionPalettePosition());
+      palette.createDiv({ cls: "lumen-palette-divider", attr: { "aria-hidden": "true" } });
+    } else {
+      const colors = palette.createDiv({ cls: "lumen-color-row" });
+      const chips = MARK_COLORS.map(colour => {
+        const chip = colors.createEl("button", { cls: "lumen-color-chip", attr: { "aria-label": `Choose ${colour}` } });
+        chip.dataset.color = colour;
+        chip.style.setProperty("--mark-color", colour);
+        chip.addEventListener("click", event => {
+          event.stopPropagation();
+          chooseColour(colour);
+        });
+        return chip;
       });
-      colorChips.push(chip);
+      displayColour = colour => {
+        for (const chip of chips) {
+          const active = chip.dataset.color === colour;
+          chip.classList.toggle("is-active", active);
+          chip.setAttribute("aria-pressed", String(active));
+        }
+      };
     }
+    let displayedColour = resolveAnnotationColour(bundle?.annotationColour, this.vaultAnnotationColour);
+    const refreshColour = () => {
+      displayedColour = resolveAnnotationColour(bundle?.annotationColour, this.vaultAnnotationColour);
+      displayColour(displayedColour);
+    };
+    refreshColour();
+    const unsubscribePdf = bundle?.annotationColour.subscribe(refreshColour);
+    const unsubscribeVault = this.vaultAnnotationColour?.subscribe(refreshColour);
+    this.selectionPaletteColourCleanup = () => {
+      unsubscribePdf?.();
+      unsubscribeVault?.();
+    };
     const styles = palette.createDiv({ cls: "lumen-style-row lumen-selection-styles" });
     for (const [style, icon] of [["highlight", "highlighter"], ["underline", "underline"], ["dashed", "minus"], ["dotted", "ellipsis"], ["strike", "strikethrough"], ["box", "square"], ["comment", "message-square"]] as const) {
       styles.append(iconButton(icon, `Apply ${markLabel(style)}`, () => {
-        this.commitSelection(style, pendingColor, style === "comment");
+        this.commitSelection(style, displayedColour, style === "comment");
       }));
     }
+    if (this.mobileRuntime) palette.createDiv({ cls: "lumen-palette-divider", attr: { "aria-hidden": "true" } });
     const actions = palette.createDiv({ cls: "lumen-palette-actions" });
     actions.append(iconButton("copy", "Copy selected text", () => {
       void this.writeClipboard(pendingSelection.quote);
       this.closeSelectionPalette();
     }));
-    if (this.mobileRuntime) return;
     this.trackSelectionPalettePosition();
   }
 
@@ -2458,8 +2493,8 @@ export class LumenPdfView extends FileView {
     const palette = this.selectionPalette;
     const doc = this.containerEl.ownerDocument;
     const viewWindow = doc.defaultView;
-    if (this.mobileRuntime || !palette || !viewWindow) return;
-    palette.classList.add("is-desktop-surface");
+    if (!palette || !viewWindow) return;
+    if (!this.mobileRuntime) palette.classList.add("is-desktop-surface");
     const update = () => this.scheduleSelectionPalettePosition();
     // Capture scroll from ancestors too: a popout or enclosing workspace can
     // move this pane without changing its own scroll offset.
@@ -2471,6 +2506,7 @@ export class LumenPdfView extends FileView {
     const observer = new ResizeObserver(update);
     observer.observe(this.scrollEl);
     observer.observe(palette);
+    if (this.mobileRuntime) observer.observe(this.toolbarEl);
     this.selectionPaletteCleanup = () => {
       doc.removeEventListener("scroll", update, true);
       viewWindow.removeEventListener("resize", update);
@@ -2487,15 +2523,17 @@ export class LumenPdfView extends FileView {
   private stopSelectionPalettePosition(): void {
     this.selectionPaletteCleanup?.();
     this.selectionPaletteCleanup = null;
+    this.selectionPaletteColourCleanup?.();
+    this.selectionPaletteColourCleanup = null;
   }
 
   private scheduleSelectionPalettePosition(): void {
-    if (this.mobileRuntime || !this.selectionPalette || this.selectionPaletteRaf) return;
+    if (!this.selectionPalette || !this.selectionPaletteCleanup || this.selectionPaletteRaf) return;
     const viewWindow = this.containerEl.ownerDocument.defaultView;
     if (!viewWindow) return;
     this.selectionPaletteRaf = viewWindow.requestAnimationFrame(() => {
       this.selectionPaletteRaf = 0;
-      const nativeSelection = viewWindow.getSelection();
+      const nativeSelection = this.mobileRuntime ? null : viewWindow.getSelection();
       const captured = this.selection?.nativeRange;
       if (nativeSelection && !nativeSelection.isCollapsed && nativeSelection.rangeCount && captured) {
         const range = nativeSelection.getRangeAt(0);
@@ -2514,21 +2552,30 @@ export class LumenPdfView extends FileView {
     const palette = this.selectionPalette;
     const selectedPages = this.selection?.paletteBounds;
     const viewWindow = this.containerEl.ownerDocument.defaultView;
-    if (this.mobileRuntime || !palette || !selectedPages?.length || !viewWindow) return;
+    if (!palette || !selectedPages?.length || !viewWindow) return;
     const viewport = viewWindow.visualViewport;
     const viewportLeft = viewport?.offsetLeft ?? 0;
     const viewportTop = viewport?.offsetTop ?? 0;
     const scroll = this.scrollEl.getBoundingClientRect();
     const root = this.rootEl.getBoundingClientRect();
     const toolbar = this.toolbarEl.getBoundingClientRect();
+    const viewportWidth = viewport?.width ?? viewWindow.innerWidth;
+    const viewportHeight = viewport?.height ?? viewWindow.innerHeight;
+    const mobileHeight = this.mobileRuntime
+      ? Number.parseFloat(this.rootEl.style.getPropertyValue("--lumen-mobile-viewport-height")) : 0;
+    const viewportBottom = viewportTop + (this.mobileRuntime && mobileHeight > 0 ? Math.min(viewportHeight, mobileHeight) : viewportHeight);
     const bounds: PaletteRect = {
-      left: Math.max(viewportLeft, scroll.left, root.left),
-      right: Math.min(viewportLeft + (viewport?.width ?? viewWindow.innerWidth), scroll.left + this.scrollEl.clientWidth, root.right),
+      left: Math.max(viewportLeft + this.mobileSafeArea.left, scroll.left, root.left),
+      right: Math.min(viewportLeft + viewportWidth - this.mobileSafeArea.right, scroll.left + this.scrollEl.clientWidth, root.right),
       top: Math.max(viewportTop, scroll.top, root.top, toolbar.bottom),
-      bottom: Math.min(viewportTop + (viewport?.height ?? viewWindow.innerHeight), scroll.top + this.scrollEl.clientHeight, root.bottom),
+      bottom: Math.min(viewportBottom - this.mobileSafeArea.bottom, scroll.top + this.scrollEl.clientHeight, root.bottom),
     };
-    // A fully offscreen pane has no usable intersection on that axis. Keep
-    // controls reachable in the viewport until the reader comes back into view.
+    if (this.mobileRuntime) {
+      const visible = bounds.right > bounds.left && bounds.bottom - bounds.top >= 38;
+      palette.style.visibility = visible ? "" : "hidden";
+      if (!visible) return;
+    }
+    // Desktop keeps controls reachable while a pane is fully offscreen.
     if (bounds.right <= bounds.left) {
       bounds.left = viewportLeft;
       bounds.right = viewportLeft + (viewport?.width ?? viewWindow.innerWidth);
@@ -2537,8 +2584,12 @@ export class LumenPdfView extends FileView {
       bounds.top = viewportTop;
       bounds.bottom = viewportTop + (viewport?.height ?? viewWindow.innerHeight);
     }
-    const horizontalMargin = Math.min(SELECTION_PALETTE_MARGIN, (bounds.right - bounds.left) / 4);
-    const verticalMargin = Math.min(SELECTION_PALETTE_MARGIN, (bounds.bottom - bounds.top) / 4);
+    const width = bounds.right - bounds.left;
+    const horizontalMargin = Math.min(SELECTION_PALETTE_MARGIN,
+      this.mobileRuntime ? Math.max(0, (width - 276) / 2) : width / 4);
+    const height = bounds.bottom - bounds.top;
+    const verticalMargin = Math.min(SELECTION_PALETTE_MARGIN,
+      this.mobileRuntime ? Math.max(0, (height - 38) / 2) : height / 4);
     bounds.left += horizontalMargin;
     bounds.right -= horizontalMargin;
     bounds.top += verticalMargin;
@@ -2570,12 +2621,24 @@ export class LumenPdfView extends FileView {
     const maxWidth = `${Math.min(bounds.right - bounds.left, palette.classList.contains("lumen-extension-palette") ? 340 : Infinity)}px`;
     const maxHeight = `${bounds.bottom - bounds.top}px`;
     if (palette.style.maxWidth !== maxWidth) palette.style.maxWidth = maxWidth;
-    if (palette.style.maxHeight !== maxHeight) palette.style.maxHeight = maxHeight;
+    if (!this.mobileRuntime && palette.style.maxHeight !== maxHeight) palette.style.maxHeight = maxHeight;
     const size = palette.getBoundingClientRect();
     const position = selectionPalettePosition(anchor, bounds, size.width, size.height);
     palette.style.left = `${position.left}px`;
     palette.style.top = `${position.top}px`;
     palette.dataset.placement = position.placement;
+    if (!this.mobileRuntime) return;
+    const picker = palette.querySelector<HTMLElement>(".lumen-mobile-colour-picker:not([hidden])");
+    const swatch = palette.querySelector<HTMLElement>(".lumen-mobile-colour-trigger");
+    if (!picker || !swatch) return;
+    const row = palette.getBoundingClientRect();
+    const swatchRect = swatch.getBoundingClientRect();
+    const pickerPosition = mobileColourPickerPosition(row, (swatchRect.left + swatchRect.right) / 2, bounds, position.placement);
+    picker.style.left = `${pickerPosition.left - row.left - palette.clientLeft}px`;
+    picker.style.top = `${pickerPosition.top - row.top - palette.clientTop}px`;
+    picker.style.maxHeight = `${pickerPosition.height}px`;
+    picker.style.visibility = pickerPosition.height > 12 ? "" : "hidden";
+    picker.dataset.placement = pickerPosition.placement;
   }
 
   private commitExtension(): void {
@@ -2653,7 +2716,14 @@ export class LumenPdfView extends FileView {
     this.rootEl?.classList.remove("is-extending-annotation");
   }
 
-  private commitSelection(style: MarkStyle, color: string, openEditor: boolean): void {
+  private rememberAnnotationColour(colour: AnnotationColour): void {
+    void this.bundle?.rememberAnnotationColour(colour).catch(error => {
+      console.error("Lumen could not save the PDF annotation colour", error);
+      new Notice("Lumen could not save this PDF’s annotation colour.");
+    });
+  }
+
+  private commitSelection(style: MarkStyle, color: AnnotationColour, openEditor: boolean): void {
     if (!this.selection || !this.bundle) return;
     const annotations: PdfAnnotation[] = [];
     const hasCompleteRanges = this.selection.quoteRanges.size === this.selection.pages.size;
@@ -2665,6 +2735,7 @@ export class LumenPdfView extends FileView {
       annotations.push(annotation);
     }
     const first = annotations[0];
+    if (first) this.rememberAnnotationColour(color);
     for (const annotation of annotations) {
       if (annotations.length > 1) annotation.groupId = first.id;
       this.index.put(annotation);
@@ -3611,7 +3682,9 @@ export class LumenPdfView extends FileView {
     const markerHeight = markerWidth * (bounds.width / Math.max(1, bounds.height));
     const x = clamp((event.clientX - bounds.left) / bounds.width - markerWidth / 2, 0, 1 - markerWidth);
     const y = clamp((event.clientY - bounds.top) / bounds.height - markerHeight / 2, 0, 1 - markerHeight);
-    const annotation = newPageNote(state.pageNumber, x, y, MARK_COLORS[0]);
+    const colour = resolveAnnotationColour(this.bundle.annotationColour, this.vaultAnnotationColour);
+    const annotation = newPageNote(state.pageNumber, x, y, colour);
+    this.rememberAnnotationColour(colour);
     annotation.rects[0].height = markerHeight;
     this.index.put(annotation);
     this.bundle.repository.queue({ op: "put", annotation });
@@ -3965,7 +4038,7 @@ export class LumenPdfView extends FileView {
         // Journal writes are incremental and bounded. A full snapshot can be
         // hundreds of megabytes for extreme annotation sets, so closing or
         // switching a PDF must never synchronously rebuild it.
-        await this.bundle.repository.flushJournal();
+        await Promise.all([this.bundle.repository.flushJournal(), this.bundle.flushAnnotationColour()]);
       } catch (error) {
         console.error("Lumen could not flush annotations while closing the PDF", error);
         new Notice("Lumen could not flush recent annotation changes.", 8000);

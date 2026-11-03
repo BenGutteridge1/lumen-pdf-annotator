@@ -2,6 +2,7 @@ import { normalizePath, TFile, Vault } from "obsidian";
 import { AnnotationIndex, AnnotationMutation, MARK_COLORS, MarkStyle, PdfAnnotation } from "./model";
 import { writeAnnotationExport } from "./annotation-export";
 import { normalizeQuoteRanges } from "./annotation-text";
+import { AnnotationColour, annotationColour, AnnotationColourPreference } from "./annotation-colour";
 
 const ROOT = ".lumen-pdf/bundles/sha256";
 const LEGACY_ROOT = ".pdf-annotator/bundles/sha256";
@@ -13,6 +14,7 @@ export interface BundleManifest {
   workingPath: string;
   originalName: string;
   updatedAt: string;
+  lastAnnotationColour?: AnnotationColour;
 }
 
 export interface BundleInfo {
@@ -54,6 +56,9 @@ export interface DocumentBundle {
   hash: string;
   folder: string;
   repository: AnnotationRepository;
+  annotationColour: AnnotationColourPreference;
+  rememberAnnotationColour(colour: AnnotationColour): Promise<void>;
+  flushAnnotationColour(): Promise<void>;
 }
 
 export async function sha256(bytes: ArrayBuffer): Promise<string> {
@@ -104,7 +109,10 @@ async function ensureFolder(vault: Vault, path: string): Promise<void> {
   let current = "";
   for (const part of normalizePath(path).split("/")) {
     current = current ? `${current}/${part}` : part;
-    if (!(await vault.adapter.exists(current))) await vault.adapter.mkdir(current);
+    if (!(await vault.adapter.exists(current))) {
+      try { await vault.adapter.mkdir(current); }
+      catch (error) { if (!(await vault.adapter.exists(current))) throw error; }
+    }
   }
 }
 
@@ -438,6 +446,37 @@ export class AnnotationRepository {
   }
 }
 
+interface ManifestState {
+  colour: AnnotationColourPreference;
+  savedColour?: AnnotationColour;
+  pendingColourWrites: number;
+  pending: Promise<unknown>;
+}
+
+const vaultManifests = new WeakMap<Vault, Map<string, ManifestState>>();
+
+function manifestState(vault: Vault, hash: string): ManifestState {
+  let manifests = vaultManifests.get(vault);
+  if (!manifests) vaultManifests.set(vault, manifests = new Map<string, ManifestState>());
+  let state = manifests.get(hash);
+  if (!state) {
+    state = { colour: new AnnotationColourPreference(), pendingColourWrites: 0, pending: Promise.resolve() };
+    manifests.set(hash, state);
+  }
+  return state;
+}
+
+function queueManifestOperation<T>(state: ManifestState, operation: () => Promise<T>): Promise<T> {
+  const next = state.pending.then(operation);
+  state.pending = next.catch(() => {});
+  return next;
+}
+
+function readManifest(text: string, hash: string): BundleManifest | null {
+  try { return coerceManifest(JSON.parse(text), hash); }
+  catch { return null; }
+}
+
 export async function openBundle(
   vault: Vault,
   file: TFile,
@@ -458,18 +497,57 @@ export async function openBundle(
     originalName: file.name,
     updatedAt: new Date().toISOString(),
   };
-  let shouldWriteManifest = true;
-  if (await vault.adapter.exists(manifestPath)) {
-    try {
-      const previous = coerceManifest(JSON.parse(await vault.adapter.read(manifestPath)), hash);
-      if (previous?.sha256 === hash && previous.workingPath === file.path && previous.originalName === file.name) {
-        shouldWriteManifest = false;
+  const { adapter } = vault;
+  const state = manifestState(vault, hash);
+  await queueManifestOperation(state, async () => {
+    let stored: BundleManifest | null = null;
+    if (await adapter.exists(manifestPath)) {
+      try { stored = readManifest(await adapter.read(manifestPath), hash); }
+      catch { /* replace unreadable manifests */ }
+      if (stored?.sha256 !== hash || stored.workingPath !== file.path || stored.originalName !== file.name) {
+        const updated = await adapter.process(manifestPath, text => {
+          const previous = readManifest(text, hash);
+          return JSON.stringify({
+            ...previous,
+            ...manifest,
+            lastAnnotationColour: previous?.sha256 === hash ? previous.lastAnnotationColour : undefined,
+          }, null, 2);
+        });
+        stored = readManifest(updated, hash);
       }
-    } catch { /* replace malformed manifests */ }
-  }
-  if (shouldWriteManifest) await vault.adapter.write(manifestPath, JSON.stringify(manifest, null, 2));
+    } else {
+      await adapter.write(manifestPath, JSON.stringify(manifest, null, 2));
+    }
+    state.savedColour = stored?.lastAnnotationColour;
+    if (!state.pendingColourWrites) state.colour.update(state.savedColour);
+  });
   const repository = new AnnotationRepository(vault, folder, hash, file.path, onMutation);
-  return { hash, folder, repository };
+  return {
+    hash, folder, repository, annotationColour: state.colour,
+    async flushAnnotationColour() { await state.pending; },
+    rememberAnnotationColour(colour) {
+      if (colour === state.colour.colour && (state.pendingColourWrites || state.savedColour === colour)) {
+        return state.pending.then(() => {});
+      }
+      state.pendingColourWrites++;
+      state.colour.update(colour);
+      return queueManifestOperation(state, async () => {
+        try {
+          if (state.savedColour === colour) return;
+          await adapter.process(manifestPath, text => {
+            const stored = readManifest(text, hash);
+            return JSON.stringify({
+              ...(stored?.sha256 === hash ? stored : manifest),
+              lastAnnotationColour: colour,
+            }, null, 2);
+          });
+          state.savedColour = colour;
+        } finally {
+          state.pendingColourWrites--;
+        }
+      });
+    },
+  };
 }
 
 function coerceManifest(value: unknown, hash: string): BundleManifest | null {
@@ -477,11 +555,13 @@ function coerceManifest(value: unknown, hash: string): BundleManifest | null {
   const item = value as Partial<BundleManifest>;
   if (typeof item.originalName !== "string") return null;
   return {
+    ...item,
     version: typeof item.version === "number" ? item.version : 1,
     sha256: typeof item.sha256 === "string" ? item.sha256 : hash,
     workingPath: typeof item.workingPath === "string" ? item.workingPath : item.originalName,
     originalName: item.originalName,
     updatedAt: typeof item.updatedAt === "string" ? item.updatedAt : new Date(0).toISOString(),
+    lastAnnotationColour: annotationColour(item.lastAnnotationColour),
   };
 }
 

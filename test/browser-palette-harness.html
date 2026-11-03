@@ -6,7 +6,8 @@ body{margin:16px}header{display:flex;gap:16px;align-items:center;height:48px}h1{
 </style>
 <header><h1>Lumen desktop selection palette</h1><button id="run">Run palette checks</button><span id="status">Loading real PDF.js reader…</span></header><div id="reader"><div class="view-content"></div></div><ol id="results"></ol>
 <script src="harness.js"></script><script>
-const {LumenPdfView,Platform,TFile}=LumenHarness;
+const {LumenPdfView,LumenSettingTab,VaultAnnotationColour,Platform,TFile}=LumenHarness;
+const mobile=new URLSearchParams(location.search).has('mobile');
 const canvases=[];
 function element(tag,options={},parent){const node=document.createElement(tag);if(options.cls)node.className=options.cls;if(options.text!==undefined)node.textContent=options.text;for(const[key,value]of Object.entries(options.attr||{}))node.setAttribute(key,value);parent?.append(node);if(tag==='canvas')canvases.push(node);return node;}
 HTMLElement.prototype.createEl=function(tag,options){return element(tag,options,this);};HTMLElement.prototype.createDiv=function(options){return element('div',options,this);};HTMLElement.prototype.createSpan=function(options){return element('span',options,this);};DocumentFragment.prototype.createEl=HTMLElement.prototype.createEl;HTMLElement.prototype.empty=function(){this.replaceChildren();};HTMLElement.prototype.addClass=function(...names){this.classList.add(...names);};HTMLElement.prototype.removeClass=function(...names){this.classList.remove(...names);};HTMLElement.prototype.setCssProps=function(values){for(const[key,value]of Object.entries(values))this.style.setProperty(key,value);};Node.prototype.instanceOf=function(Type){return this instanceof Type;};globalThis.createEl=(tag,options)=>element(tag,options);globalThis.createDiv=options=>element('div',options);globalThis.createFragment=()=>document.createDocumentFragment();
@@ -14,8 +15,33 @@ const delay=ms=>new Promise(resolve=>setTimeout(resolve,ms)),frame=()=>new Promi
 async function until(fn,timeout=10000){const end=performance.now()+timeout;while(!fn()){if(performance.now()>end)throw Error('Reader timeout');await delay(30);}}
 function assert(value,message){if(!value)throw Error(message);}
 function pdfBytes(count=4){const objects=[],font=3+count*2;objects.push('<< /Type /Catalog /Pages 2 0 R >>',`<< /Type /Pages /Kids [${Array.from({length:count},(_,i)=>`${3+i*2} 0 R`).join(' ')}] /Count ${count} >>`);for(let page=0;page<count;page++){const content=`BT /F1 12 Tf 50 738 Td ${Array.from({length:25},(_,line)=>`${line?'0 -25 Td ':''}(Page ${page+1} line ${String(line+1).padStart(2,'0')}: Original text for selecting forward and backward.) Tj`).join(' ')} ET`;objects.push(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 ${font} 0 R >> >> /Contents ${4+page*2} 0 R >>`,`<< /Length ${content.length} >>\nstream\n${content}\nendstream`);}objects.push('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>');let source='%PDF-1.4\n';const offsets=[0];objects.forEach((value,i)=>{offsets.push(source.length);source+=`${i+1} 0 obj\n${value}\nendobj\n`;});const xref=source.length;source+=`xref\n0 ${objects.length+1}\n0000000000 65535 f \n${offsets.slice(1).map(offset=>`${String(offset).padStart(10,'0')} 00000 n \n`).join('')}trailer << /Size ${objects.length+1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF`;return new TextEncoder().encode(source).buffer;}
-let view,files,ready,clipboard=[];
-async function boot(){Platform.isMobile=false;const bytes=pdfBytes();files=new Map();const adapter={exists:async path=>files.has(path),read:async path=>files.get(path),write:async(path,text)=>files.set(path,text),mkdir:async path=>files.set(path,''),append:async(path,text)=>files.set(path,(files.get(path)||'')+text),list:async path=>({files:[...files.keys()].filter(file=>file.startsWith(`${path}/`)),folders:[]})};const app={vault:{adapter,readBinary:async()=>bytes.slice(0),getName:()=>'Synthetic test vault'},scope:{},workspace:{getLeavesOfType:()=>[]}};view=new LumenPdfView({app,containerEl:document.querySelector('#reader'),contentEl:document.querySelector('.view-content')});view.file=new TFile('Selection geometry.pdf',bytes.byteLength);await view.onOpen();await view.onLoadFile(view.file);await until(()=>view.pages.get(1)?.textReady);view.writeClipboard=async text=>{clipboard.push(text);};window.paletteView=view;document.querySelector('#status').textContent='Ready: select any PDF text or run checks';return view;}
+let view,ready,defaults,settings,clipboard=[];
+const files=new Map();
+const adapterOperations={reads:0,processes:0};
+const adapter={
+  exists:async path=>files.has(path),
+  read:async path=>{adapterOperations.reads++;return files.get(path);},
+  write:async(path,text)=>files.set(path,text),
+  process:async(path,transform)=>{adapterOperations.processes++;const updated=transform(files.get(path));files.set(path,updated);return updated;},
+  mkdir:async path=>files.set(path,''),
+  append:async(path,text)=>files.set(path,(files.get(path)||'')+text),
+  list:async path=>({files:[...files.keys()].filter(file=>file.startsWith(`${path}/`)),folders:[]}),
+};
+async function boot(name='Selection geometry.pdf',count=4){
+  Platform.isMobile=mobile;
+  const bytes=pdfBytes(count),reader=document.querySelector('#reader');
+  if(mobile){reader.style.width='320px';reader.style.height='min(640px,calc(100vh - 104px))';document.querySelector('h1').textContent='Lumen mobile selection palette';}
+  if(view){await view.onClose();view.cleanups.forEach(cleanup=>cleanup());}
+  const app={vault:{adapter,readBinary:async()=>bytes.slice(0),getName:()=>'Synthetic test vault'},scope:{},workspace:{getLeavesOfType:()=>[]}};
+  defaults=new VaultAnnotationColour(app.vault);await defaults.load();
+  settings=new LumenSettingTab({app,annotationColour:defaults});
+  view=new LumenPdfView({app,containerEl:reader,contentEl:document.querySelector('.view-content')},'light',undefined,'PDF annotations',false,undefined,undefined,mobile?{restore:()=>true,save:()=>{}}:undefined,defaults);
+  view.file=new TFile(name,bytes.byteLength);
+  await view.onOpen();await view.onLoadFile(view.file);await until(()=>view.pages.get(1)?.textReady);
+  view.writeClipboard=async text=>{clipboard.push(text);};window.paletteView=view;
+  document.querySelector('#status').textContent='Ready: select any PDF text or run checks';
+  return view;
+}
 ready=boot();window.paletteReady=ready;
 const runs=page=>view.pages.get(page)?.quoteTextRuns?.filter(run=>run.text.trim())||[];
 async function mounted(page){view.restorePage(page);await until(()=>view.pages.get(page)?.textReady);return runs(page);}
@@ -32,14 +58,16 @@ const anchor=reverse?lastRun:firstRun,releaseRun=reverse?firstRun:lastRun,press=
 anchor.element.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,pointerType:'mouse',isPrimary:true,button:0,buttons:1,clientX:press.x,clientY:press.y}));
 anchor.element.dispatchEvent(new MouseEvent('mousedown',{bubbles:true,button:0,buttons:1,clientX:press.x,clientY:press.y}));
 const selection=getSelection();if(reverse)selection.setBaseAndExtent(end,endOffset,start,startOffset);else selection.setBaseAndExtent(start,startOffset,end,endOffset);
-releaseRun.element.dispatchEvent(new MouseEvent('mouseup',{bubbles:true,button:0,clientX:release.x,clientY:release.y}));
+if(mobile)releaseRun.element.dispatchEvent(new PointerEvent('pointerup',{bubbles:true,pointerType:'touch',isPrimary:true,clientX:release.x,clientY:release.y}));
+else releaseRun.element.dispatchEvent(new MouseEvent('mouseup',{bubbles:true,button:0,clientX:release.x,clientY:release.y}));
+if(mobile)await delay(210);
 await frame();await frame();assert(view.selectionPalette,'Palette captured the native PDF.js range after natural pointerdown/reselection');return snapshot();}
 window.paletteClickPlan=()=>point(runs(1)[9],10);
 async function dismissWithTextClick(){const target=runs(1)[9],position=point(target,10);for(const[type,EventClass]of[['pointerdown',PointerEvent],['mousedown',MouseEvent],['mouseup',MouseEvent],['click',MouseEvent]])target.element.dispatchEvent(new EventClass(type,{bubbles:true,pointerType:'mouse',isPrimary:true,button:0,clientX:position.x,clientY:position.y}));await frame();await frame();return{paletteOpen:Boolean(view.selectionPalette),selectionCollapsed:getSelection().isCollapsed};}
 
 function snapshot(){const palette=view.selectionPalette;if(!palette)return{open:false};const rect=palette.getBoundingClientRect(),root=view.scrollEl.getBoundingClientRect(),toolbar=view.toolbarEl.getBoundingClientRect(),range=view.selection.nativeRange.getBoundingClientRect();const bounds={left:Math.max(0,root.left)+12,right:Math.min(innerWidth,root.left+view.scrollEl.clientWidth)-12,top:Math.max(0,root.top,toolbar.bottom)+12,bottom:Math.min(innerHeight,root.top+view.scrollEl.clientHeight)-12};return{open:true,placement:palette.dataset.placement,quote:view.selection.quote,pages:[...view.selection.pages.keys()],palette:{left:rect.left,right:rect.right,top:rect.top,bottom:rect.bottom,width:rect.width,height:rect.height},text:{left:range.left,right:range.right,top:range.top,bottom:range.bottom},bounds,gap:palette.dataset.placement==='below'?rect.top-range.bottom:range.top-rect.bottom,inBounds:rect.left>=bounds.left-.5&&rect.right<=bounds.right+.5&&rect.top>=bounds.top-.5&&rect.bottom<=bounds.bottom+.5,actions:[...palette.querySelectorAll('button')].map(button=>button.ariaLabel)};}
 window.paletteSelect=select;window.paletteSnapshot=snapshot;window.paletteAlignLine=alignLine;
-window.runPaletteChecks=async()=>{await ready;const checks=[],details={};document.querySelector('#run').disabled=true;document.querySelector('#results').replaceChildren();const check=(label,value)=>{assert(value,label);checks.push(label);element('li',{text:`PASS · ${label}`,cls:'pass'},document.querySelector('#results'));};window.paletteHarnessResult={status:'running',checks};try{const reader=document.querySelector('#reader');reader.style.width='960px';reader.style.height='650px';await view.restoreZoom(1.25);await mounted(1);
+const runDesktopChecks=async()=>{await ready;const checks=[],details={};document.querySelector('#run').disabled=true;document.querySelector('#results').replaceChildren();const check=(label,value)=>{assert(value,label);checks.push(label);element('li',{text:`PASS · ${label}`,cls:'pass'},document.querySelector('#results'));};window.paletteHarnessResult={status:'running',checks};try{const reader=document.querySelector('#reader');reader.style.width='960px';reader.style.height='650px';await view.restoreZoom(1.25);await mounted(1);
 const forward=await select();const reverse=await select({reverse:true});details.direction={forward,reverse};check('Repeating forward then reverse selection without helper resets keeps identical palette geometry',forward.quote===reverse.quote&&['left','top','width','height'].every(key=>Math.abs(forward.palette[key]-reverse.palette[key])<.5));check('Multiline selection has a comfortable 16px gap below and stays in its reader',reverse.placement==='below'&&reverse.gap>=15.5&&reverse.inBounds);
 const targetBottom=reverse.text.bottom+reverse.palette.height+20;reader.style.height=`${targetBottom-reader.getBoundingClientRect().top}px`;await delay(80);const above=snapshot();details.resizeAbove=above;check('Resizing the pane flips the existing palette above without covering text',above.placement==='above'&&above.gap>=15.5&&above.inBounds);reader.style.height='650px';await delay(80);check('Growing the pane dynamically returns the palette below',snapshot().placement==='below');
 view.scrollEl.scrollTop+=155;await delay(80);const scrolled=snapshot();details.scrolled=scrolled;check('Scrolling updates the same palette from text geometry',scrolled.placement==='below'&&scrolled.gap>=15.5&&scrolled.inBounds);
@@ -61,5 +89,130 @@ let first;for(const[label,style]of[['highlight','highlight'],['underline','under
 const mark=view.pages.get(1).markHost.querySelector(`[data-annotation-id="${first.id}"]`);mark.click();check('Saved highlights still open the annotation editor',Boolean(view.editor));view.closeEditor();view.beginExtension(first);await select({startLine:6,endLine:6});const extension=snapshot();details.extension=extension;check('Extension palette uses the same selection geometry and retains Apply/Cancel controls',extension.inBounds&&extension.gap>=15.5&&extension.actions.includes('Apply extension')&&extension.actions.includes('Cancel extension'));view.selectionPalette.querySelector('[aria-label="Apply extension"]').click();check('Applying extension keeps the annotation and adds selected text',view.index.get(first.id).quote.includes('line 07')&&!view.selectionPalette&&!view.extensionGroupId);
 await select({startLine:5,endLine:7});const dismissed=await dismissWithTextClick();details.clickDismissal=dismissed;check('A plain text click dismisses the palette without reopening stale controls',!dismissed.paletteOpen&&dismissed.selectionCollapsed);await select({startLine:5,endLine:7});check('A fresh selection opens the palette again after click dismissal',snapshot().open);await until(()=>[...view.pages.values()].every(state=>!state.rendering&&!state.textRendering));await delay(650);const counters={renders:0,mounts:0,marks:0,releases:0,positions:0,pageRects:0,rangeRects:0},restores=[];for(const[method,key]of[['mountPage','mounts'],['renderMarks','marks'],['releasePageLayers','releases'],['positionSelectionPalette','positions']]){const original=view[method];view[method]=function(...args){counters[key]++;return original.apply(this,args);};restores.push(()=>view[method]=original);}for(const state of view.pages.values()){if(state.page){const original=state.page.render;state.page.render=function(...args){counters.renders++;return original.apply(this,args);};restores.push(()=>state.page.render=original);}const original=state.shell.getBoundingClientRect;state.shell.getBoundingClientRect=function(...args){counters.pageRects++;return original.apply(this,args);};restores.push(()=>state.shell.getBoundingClientRect=original);}const nativeRange=view.selection.nativeRange,originalRects=nativeRange.getClientRects;nativeRange.getClientRects=function(){counters.rangeRects++;return originalRects.call(this);};restores.push(()=>nativeRange.getClientRects=originalRects);const before=canvases.map(node=>({node,width:node.width,height:node.height})),canvasCount=canvases.length;for(let i=0;i<120;i++){view.scrollEl.dispatchEvent(new Event('scroll'));dispatchEvent(new Event('resize'));}await frame();await frame();const coalesced=counters.positions;await delay(200);details.performance={...counters,coalesced,canvasCountStable:canvases.length===canvasCount,canvasBackingStable:before.every(({node,width,height})=>node.width===width&&node.height===height)};restores.forEach(restore=>restore());check('Visible palette event bursts coalesce with no idle placement loop or native-range rescans',coalesced<=2&&counters.positions===coalesced&&counters.rangeRects===0&&counters.pageRects<=4);check('Palette positioning creates no PDF renders, page mounts, annotation repaints or canvases',counters.renders===0&&counters.mounts===0&&counters.marks===0&&counters.releases===0&&details.performance.canvasCountStable&&details.performance.canvasBackingStable);
 await select();window.paletteHarnessResult={status:'passed',passed:checks.length,checks,details};document.querySelector('#status').textContent=`${checks.length} palette checks passed. Reader ready for real drag verification.`;
-}catch(error){window.paletteHarnessResult={status:'failed',passed:checks.length,checks,details,error:error.stack};document.querySelector('#status').textContent=`Failed: ${error.message}`;element('li',{text:error.stack,cls:'fail'},document.querySelector('#results'));console.error(error);}finally{document.querySelector('#run').disabled=false;}return window.paletteHarnessResult;};document.querySelector('#run').onclick=window.runPaletteChecks;
+}catch(error){window.paletteHarnessResult={status:'failed',passed:checks.length,checks,details,error:error.stack};document.querySelector('#status').textContent=`Failed: ${error.message}`;element('li',{text:error.stack,cls:'fail'},document.querySelector('#results'));console.error(error);}finally{document.querySelector('#run').disabled=false;}return window.paletteHarnessResult;};
+const colourTrigger=()=>view.selectionPalette?.querySelector('.lumen-mobile-colour-trigger');
+const picker=()=>view.selectionPalette?.querySelector('.lumen-mobile-colour-picker');
+const pickerButtons=()=>Array.from(picker().querySelectorAll('button'));
+const action=label=>view.selectionPalette.querySelector(`[aria-label="${label}"]`);
+const measure=element=>element.getBoundingClientRect().toJSON();
+const apply=label=>action(`Apply ${label}`).click();
+const key=(element,key)=>element.dispatchEvent(new KeyboardEvent('keydown',{bubbles:true,key,cancelable:true}));
+const approx=(a,b)=>Math.abs(a-b)<.75;
+async function runMobileChecks(){
+  await ready;
+  const checks=[],details={},reader=document.querySelector('#reader'),run=document.querySelector('#run');
+  const check=(label,value)=>{assert(value,label);checks.push(label);element('li',{text:`PASS · ${label}`,cls:'pass'},document.querySelector('#results'));};
+  document.querySelector('#results').replaceChildren();
+  run.disabled=true;window.paletteHarnessResult={status:'running',checks};
+  try{
+    await boot();
+    const defaultSetting=settings.getSettingDefinitions().find(item=>item.control?.key==='defaultAnnotationColour');
+    const yellow='#ffd12d',green='#83cb67',blue='#6f9fe8',purple='#aa78df',pink='#e463a1';
+    const initialDefault=settings.getControlValue('defaultAnnotationColour');
+    check('Default annotation colour is exposed through settings with five choices',initialDefault===yellow&&Object.keys(defaultSetting.control.options).length===5);
+    const selected=await select({startLine:6,endLine:7,offset:155});
+    const row=view.selectionPalette,trigger=colourTrigger(),nativeQuote=getSelection().toString(),startOps={...adapterOperations};
+    const rowButtons=Array.from(row.querySelectorAll('button')),icons=Array.from(row.querySelectorAll('svg')),swatch=trigger.firstElementChild;
+    details.initial=selected;
+    check('The mobile row is exactly 276×38 with nine 26px buttons, eight 16px icons and two dividers',
+      selected.palette.width===276&&selected.palette.height===38&&rowButtons.length===9&&rowButtons.every(button=>button.offsetWidth===26&&button.offsetHeight===26)
+      &&icons.length===8&&icons.every(icon=>measure(icon).width===16&&measure(icon).height===16)
+      &&row.querySelectorAll('.lumen-palette-divider').length===2&&swatch.offsetWidth===16&&swatch.offsetHeight===16);
+    check('The row floats 16px below the captured selection and opens in yellow',selected.placement==='below'&&approx(selected.gap,16)&&trigger.dataset.color===yellow);
+    const initialOutline=getComputedStyle(swatch).outlineColor;
+    key(trigger,'ArrowDown');await frame();await frame();
+    const opened=measure(picker()),triggerRect=measure(trigger),sameRow=measure(row);
+    details.opened={opened,triggerRect,sameRow,alternatives:pickerButtons().map(button=>button.dataset.color)};
+    check('A separate 44×125 column opens 8px below the row with four other colours',
+      opened.width===44&&opened.height===125&&approx(opened.top-sameRow.bottom,8)
+      &&approx(opened.left+22,triggerRect.left+13)&&pickerButtons().length===4&&!pickerButtons().some(button=>button.dataset.color===yellow));
+    check('Opening the picker preserves the row size, selected text and storage state',
+      sameRow.width===276&&sameRow.height===38&&getSelection().toString()===nativeQuote
+      &&adapterOperations.reads===startOps.reads&&adapterOperations.processes===startOps.processes);
+    check('Opening via keyboard focuses the first alternative',document.activeElement===pickerButtons()[0]);
+    key(pickerButtons()[0],'End');check('Picker keyboard navigation reaches the last alternative',document.activeElement===pickerButtons().at(-1));
+    pickerButtons().at(-1).click();
+    check('Choosing Pink updates the trigger immediately, keeps the accent outline and closes the picker',
+      trigger.dataset.color===pink&&picker().hidden&&document.activeElement===trigger
+      &&getComputedStyle(swatch).outlineColor===initialOutline&&initialOutline==='rgb(105, 85, 220)');
+    key(trigger,'ArrowDown');check('Reopening offers the four colours other than the newly selected Pink',
+      pickerButtons().length===4&&!pickerButtons().some(button=>button.dataset.color===pink));
+    key(document.activeElement,'Escape');check('Escape closes the picker and returns focus to the swatch',picker().hidden&&document.activeElement===trigger&&view.selectionPalette===row);
+    await view.bundle.flushAnnotationColour();
+    const afterChoosing=adapterOperations.processes;
+    apply('highlight');
+    check('Applying a style uses the displayed Pink and closes the palette',view.index.onPage(1).at(-1).color===pink&&!view.selectionPalette);
+    await view.bundle.flushAnnotationColour();
+    check('Applying the chosen colour again does not write the preference twice',adapterOperations.processes===afterChoosing&&afterChoosing===startOps.processes+1);
+    await settings.setControlValue('defaultAnnotationColour',blue);
+    await select({startLine:7,endLine:7,offset:155});check('A saved PDF keeps Pink after a default change',colourTrigger().dataset.color===pink);
+    await boot('Another PDF.pdf',3);
+    await select({startLine:7,endLine:7,offset:155});
+    check('A fresh PDF opens with the vault default after recreating the reader',colourTrigger().dataset.color===blue);
+    await settings.setControlValue('defaultAnnotationColour',green);
+    check('Changing the vault default updates an untouched open palette',colourTrigger().dataset.color===green);
+    apply('comment');
+    check('Comment commits the displayed fallback and opens its editor',view.index.onPage(1).at(-1).color===green&&view.index.onPage(1).at(-1).style==='comment'&&Boolean(view.editor));
+    view.closeEditor();await settings.setControlValue('defaultAnnotationColour',purple);
+    await boot('Another PDF.pdf',3);await select({startLine:7,endLine:7,offset:155});
+    check('The first applied fallback persists after reopen and later vault-default changes',colourTrigger().dataset.color===green);
+    await boot();await select({startLine:7,endLine:7,offset:155});
+    check('Reopening the first PDF restores its independent Pink',colourTrigger().dataset.color===pink);
+    const copy=view.selection.quote;const beforeCopy=adapterOperations.processes;
+    action('Copy selected text').click();await frame();
+    check('Copy preserves the captured quote and closes without writing a colour',clipboard.at(-1)===copy&&!view.selectionPalette&&adapterOperations.processes===beforeCopy);
+    await select({startLine:17,endLine:18,offset:260});
+    const below=snapshot(),scrollingRow=view.selectionPalette,scroller=view.scrollEl;
+    const startScroll=scroller.scrollTop,targetScroll=startScroll+28,maxScroll=scroller.scrollHeight-scroller.clientHeight;
+    assert(targetScroll<=maxScroll,'Scroll fixture must have room for the full 28px move');
+    scroller.scrollTo({top:targetScroll,behavior:'instant'});
+    await frame();await frame();
+    const scrolled=snapshot(),distance=scroller.scrollTop-startScroll;
+    details.scroll={before:below,after:scrolled,startScroll,targetScroll,maxScroll,distance};
+    check('The same row follows a 28px scroll and preserves the 16px text gap',
+      approx(distance,28)&&approx(below.text.top-scrolled.text.top,distance)&&approx(below.palette.top-scrolled.palette.top,distance)
+      &&below.placement==='below'&&scrolled.placement==='below'&&approx(below.gap,16)&&approx(scrolled.gap,16)
+      &&scrolled.quote===below.quote&&view.selectionPalette===scrollingRow);
+    reader.style.height=`${scrolled.text.bottom+45-reader.getBoundingClientRect().top}px`;
+    await delay(100);
+    const flipped=snapshot();details.flipped=flipped;
+    check('The palette flips above with a 16px gap when the pane becomes short',flipped.placement==='above'&&approx(flipped.gap,16));
+    colourTrigger().click();await frame();await frame();
+    const shortened=measure(picker()),flippedRow=measure(view.selectionPalette);
+    const shortPicker=picker(),buttonHeights=pickerButtons().map(button=>measure(button).height);
+    details.shortened={shortened,flippedRow,buttonHeights,pickerScrollHeight:shortPicker.scrollHeight,placement:shortPicker.dataset.placement};
+    check('The picker stays apart from its row and scrolls when short without shrinking its options',
+      shortened.height<125&&shortPicker.scrollHeight>shortPicker.clientHeight&&buttonHeights.every(height=>height===26)
+      &&(approx(flippedRow.top-shortened.bottom,8)||approx(shortened.top-flippedRow.bottom,8)));
+    shortPicker.scrollTo({top:shortPicker.scrollHeight,behavior:'instant'});await frame();
+    check('Scrolling the short picker reaches its last full-size option',
+      shortPicker.scrollTop>0&&measure(pickerButtons().at(-1)).bottom<=shortened.bottom-.5&&view.selectionPalette.contains(shortPicker));
+    await until(()=>[...view.pages.values()].every(state=>!state.rendering&&!state.textRendering));await delay(650);
+    const counts={positions:0,rangeRects:0,renders:0,marks:0,keyboardProbes:0};
+    const originals=[[view,'positionSelectionPalette','positions'],[Range.prototype,'getClientRects','rangeRects'],[view,'renderMarks','marks'],[view,'startMobileKeyboardProbe','keyboardProbes']];
+    for(const state of view.pages.values())if(state.page)originals.push([state.page,'render','renders']);
+    const restores=originals.map(([host,method,counter])=>{const original=host[method];host[method]=function(...args){counts[counter]++;return original.apply(this,args);};return()=>host[method]=original;});
+    try{
+      colourTrigger().click();colourTrigger().click();
+      for(let i=0;i<120;i++){visualViewport.dispatchEvent(new Event('scroll'));dispatchEvent(new Event('resize'));}
+      await frame();await frame();await delay(150);
+      const positions=counts.positions;await delay(150);
+      details.performance={...counts};
+      check('Picker and viewport bursts use cached geometry, with no PDF rendering, repaint or keyboard probing',
+        positions<=3&&counts.positions===positions&&counts.rangeRects===0&&counts.renders===0&&counts.marks===0&&counts.keyboardProbes===0);
+      document.querySelector('h1').dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,pointerType:'touch'}));
+      const closed=counts.positions;visualViewport.dispatchEvent(new Event('scroll'));await delay(100);
+      check('Outside touch closes both surfaces and removes placement listeners',!view.selectionPalette&&counts.positions===closed);
+    }finally{restores.forEach(restore=>restore());}
+    window.paletteHarnessResult={status:'passed',passed:checks.length,checks,details};
+    document.querySelector('#status').textContent=`${checks.length} mobile palette checks passed.`;
+  }catch(error){
+    window.paletteHarnessResult={status:'failed',passed:checks.length,checks,details,error:error.stack};
+    document.querySelector('#status').textContent=`Failed: ${error.message}`;
+    element('li',{text:error.stack,cls:'fail'},document.querySelector('#results'));console.error(error);
+  }finally{run.disabled=false;}
+  return window.paletteHarnessResult;
+}
+window.runPaletteChecks=mobile?runMobileChecks:runDesktopChecks;
+document.querySelector('#run').onclick=window.runPaletteChecks;
 </script></html>

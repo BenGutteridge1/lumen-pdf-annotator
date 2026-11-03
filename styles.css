@@ -1932,25 +1932,78 @@
 .lumen-mark-editor.is-mobile-surface * {
   box-sizing: border-box;
 }
-.lumen-selection-palette.is-mobile-surface {
-  width: calc(100vw - 16px - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px));
-  max-width: 430px;
-  min-height: 96px;
-  flex-direction: column;
-  align-items: center;
-  gap: 3px;
-  padding: 7px 8px;
-  border-radius: 17px;
+.lumen-mobile-annotation-palette.is-mobile-surface {
+  bottom: auto;
+  transform: none;
+  display: grid;
+  grid-template-columns: 26px 1px minmax(0, 188px) 1px 26px;
+  width: 276px;
+  height: 38px;
+  gap: 4px;
+  padding: 5px 8px;
+  border-radius: 13px;
 }
-.lumen-selection-palette.is-mobile-surface .lumen-color-row,
-.lumen-selection-palette.is-mobile-surface .lumen-selection-styles {
-  justify-content: center;
-  gap: 0;
-  width: 100%;
+.lumen-mobile-annotation-palette.is-mobile-surface .lumen-selection-styles {
+  display: flex;
+  flex-wrap: nowrap;
+  min-width: 0;
+  gap: 1px;
   padding: 0;
   border: 0;
 }
-.lumen-selection-palette.is-mobile-surface .lumen-color-chip:not(#lumen-specificity),
+.lumen-mobile-annotation-palette.is-mobile-surface .lumen-icon-button:not(#lumen-specificity) {
+  flex: 0 1 26px;
+  width: 26px;
+  height: 26px;
+  min-width: 0;
+  border-radius: 6px;
+}
+.lumen-mobile-annotation-palette .lumen-icon-button svg {
+  flex: none;
+  width: 16px;
+  height: 16px;
+}
+.lumen-palette-divider {
+  width: 1px;
+  height: 18px;
+  background: var(--background-modifier-border);
+}
+.lumen-mobile-colour-swatch {
+  display: block;
+  width: 16px;
+  height: 16px;
+  flex: none;
+  border-radius: 4px;
+  background: var(--mark-color);
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, .1);
+}
+.lumen-mobile-colour-trigger .lumen-mobile-colour-swatch {
+  outline: 2px solid var(--lumen-accent);
+  outline-offset: 2px;
+}
+.lumen-mobile-colour-picker {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  width: 44px;
+  height: 125px;
+  padding: 5px 8px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 13px;
+  background: var(--background-primary);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, .22);
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: none;
+  touch-action: pan-y;
+}
+.lumen-mobile-colour-picker[hidden] {
+  display: none;
+}
+.lumen-mobile-annotation-palette.is-mobile-surface .lumen-mobile-colour-picker .lumen-icon-button:not(#lumen-specificity) {
+  flex-shrink: 0;
+}
 .lumen-mark-editor.is-mobile-surface .lumen-color-chip:not(#lumen-specificity) {
   position: relative;
   width: 44px;
@@ -1960,7 +2013,6 @@
   background: transparent;
   box-shadow: none;
 }
-.lumen-selection-palette.is-mobile-surface .lumen-color-chip:after,
 .lumen-mark-editor.is-mobile-surface .lumen-color-chip:after {
   content: "";
   position: absolute;
@@ -1973,25 +2025,21 @@
   transform: translate(-50%, -50%);
   box-shadow: inset 0 0 0 1px rgba(0, 0, 0, .1);
 }
-.lumen-selection-palette.is-mobile-surface .lumen-color-chip.is-active:after,
 .lumen-mark-editor.is-mobile-surface .lumen-color-chip.is-active:after {
   box-shadow: 0 0 0 2px var(--background-primary), 0 0 0 4px var(--lumen-accent);
 }
-.lumen-selection-palette.is-mobile-surface .lumen-icon-button:not(#lumen-specificity),
+.lumen-extension-palette.is-mobile-surface .lumen-icon-button:not(#lumen-specificity),
 .lumen-mark-editor.is-mobile-surface .lumen-icon-button:not(#lumen-specificity) {
   width: 44px;
   min-width: 44px;
   height: 44px;
   border-radius: 10px;
 }
-.lumen-selection-palette.is-mobile-surface .lumen-palette-actions {
-  position: absolute;
-  right: 8px;
-  top: 7px;
-}
 .lumen-extension-palette.is-mobile-surface {
   width: calc(100vw - 16px);
-  min-height: 0;
+  flex-direction: column;
+  gap: 3px;
+  border-radius: 17px;
   max-width: 430px;
   padding: 0;
   border: 0;
@@ -2070,15 +2118,6 @@
   }
 }
 @media (max-width: 360px) {
-  .lumen-selection-palette.is-mobile-surface .lumen-color-row {
-    padding-right: 44px;
-  }
-  .lumen-selection-palette.is-mobile-surface .lumen-selection-styles {
-    width: 176px;
-    justify-content: center;
-    flex-wrap: wrap;
-    overflow: visible;
-  }
   .lumen-mark-editor.is-mobile-surface .lumen-style-row,
   .lumen-reader.is-mobile .lumen-inspector-detail .lumen-style-row {
     width: 176px;
