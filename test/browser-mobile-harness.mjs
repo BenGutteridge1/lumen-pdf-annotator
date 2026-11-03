@@ -63,5 +63,6 @@ await build({
   } }],
 });
 fs.copyFileSync('test/browser-mobile-harness.html', path.join(output, 'index.html'));
+fs.copyFileSync('test/browser-palette-harness.html', path.join(output, 'palette.html'));
 fs.copyFileSync('styles.css', path.join(output, 'styles.css'));
 console.log(`Browser harness built at ${output}`);

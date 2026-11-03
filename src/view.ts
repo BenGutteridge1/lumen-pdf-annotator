@@ -8,6 +8,7 @@ import { annotationTarget, comparableFileName, QuoteAnnotationRecord, quoteAnnot
 import { loadPdf } from "./pdf-runtime";
 import { DesktopPdfZoom } from "./desktop-zoom";
 import { MobilePdfZoom } from "./mobile-zoom";
+import { PaletteRect, SELECTION_PALETTE_MARGIN, SelectionPageBounds, selectionPalettePosition, visibleSelectionPages } from "./selection-palette";
 import {
   cacheOutlineHeadingLocation,
   centeredOutlineScrollTop,
@@ -114,6 +115,7 @@ interface PendingSelection {
   nativeRange: Range;
   x: number;
   y: number;
+  paletteBounds?: SelectionPageBounds[];
 }
 
 interface ZoomAnchor {
@@ -314,6 +316,8 @@ export class LumenPdfView extends FileView {
   private inspectorSort: "newest" | "oldest" | "page" = "newest";
   private selection: PendingSelection | null = null;
   private selectionPalette: HTMLElement | null = null;
+  private selectionPaletteCleanup: (() => void) | null = null;
+  private selectionPaletteRaf = 0;
   private suppressNextSelectionCapture = false;
   private extensionGroupId: string | null = null;
   private editor: HTMLElement | null = null;
@@ -468,6 +472,7 @@ export class LumenPdfView extends FileView {
 
   onResize(): void {
     if (this.mobileRuntime) this.scheduleMobileViewportUpdate();
+    else this.scheduleSelectionPalettePosition();
   }
 
   async onClose(): Promise<void> {
@@ -806,10 +811,9 @@ export class LumenPdfView extends FileView {
       });
     } else {
       this.scrollEl.addEventListener("mouseup", event => {
-        if (this.suppressNextSelectionCapture) {
-          this.suppressNextSelectionCapture = false;
-          return;
-        }
+        // Pointerdown dismisses the old palette and clears its native range.
+        // A noncollapsed range here therefore belongs to a fresh selection,
+        // including a reverse drag over exactly the same text.
         this.captureSelection(event.clientX, event.clientY);
       });
     }
@@ -824,7 +828,7 @@ export class LumenPdfView extends FileView {
     this.rootEl.addEventListener("pointerdown", event => {
       const target = event.target as Node;
       if (this.selectionPalette && !this.selectionPalette.contains(target)) {
-        this.suppressNextSelectionCapture = true;
+        if (this.mobileRuntime) this.suppressNextSelectionCapture = true;
         this.closeSelectionPalette();
       }
       if (this.editor && !this.editor.contains(target) && !(target as Element).closest?.(".lumen-mark")) this.closeEditor();
@@ -1803,6 +1807,7 @@ export class LumenPdfView extends FileView {
     // Zoom can leave scroll offsets unchanged, including at a page boundary.
     // Buttons, hotkeys and gestures all need to save their precise final scale.
     this.rootEl.dispatchEvent(new Event("lumen-zoom-change"));
+    this.scheduleSelectionPalettePosition();
   }
 
   setTheme(theme: PdfTheme): void {
@@ -2169,9 +2174,7 @@ export class LumenPdfView extends FileView {
 
   private captureSelection(clientX?: number, clientY?: number): void {
     if (this.desktopZoomPreview !== null) return;
-    const nativeSelection = this.mobileRuntime
-      ? this.containerEl.ownerDocument.defaultView?.getSelection() ?? null
-      : window.getSelection();
+    const nativeSelection = this.containerEl.ownerDocument.defaultView?.getSelection() ?? null;
     if (!nativeSelection || nativeSelection.isCollapsed || !nativeSelection.rangeCount) return;
     const range = nativeSelection.getRangeAt(0).cloneRange();
     if (this.mobileRuntime && !this.selectionRangeBelongsToReader(range)) return;
@@ -2227,7 +2230,17 @@ export class LumenPdfView extends FileView {
     const selectionBounds = range.getBoundingClientRect();
     const x = Number.isFinite(clientX) ? clientX! : selectionBounds.left + selectionBounds.width / 2;
     const y = Number.isFinite(clientY) ? clientY! : selectionBounds.bottom;
-    this.selection = { quote, pages: byPage, quoteRanges, quoteRangeVersions, nativeRange: range, x, y };
+    const paletteBounds = this.mobileRuntime ? undefined : Array.from(byPage, ([page, fragments]) => {
+      const bounds = { page, left: 1, top: 1, right: 0, bottom: 0 };
+      for (const rect of fragments) {
+        bounds.left = Math.min(bounds.left, rect.x);
+        bounds.top = Math.min(bounds.top, rect.y);
+        bounds.right = Math.max(bounds.right, rect.x + rect.width);
+        bounds.bottom = Math.max(bounds.bottom, rect.y + rect.height);
+      }
+      return bounds;
+    });
+    this.selection = { quote, pages: byPage, quoteRanges, quoteRangeVersions, nativeRange: range, x, y, paletteBounds };
     if (this.extensionGroupId) this.showExtensionPalette();
     else this.showSelectionPalette();
   }
@@ -2370,9 +2383,10 @@ export class LumenPdfView extends FileView {
   private showSelectionPalette(): void {
     if (!this.selection) return;
     const pendingSelection = this.selection;
+    this.stopSelectionPalettePosition();
     this.selectionPalette?.remove();
     this.selectionPalette = null;
-    const palette = this.detachedDocument().body.createDiv({ cls: "lumen-selection-palette" });
+    const palette = this.containerEl.ownerDocument.body.createDiv({ cls: "lumen-selection-palette" });
     this.prepareDetachedSurface(palette);
     if (this.mobileRuntime) {
       palette.setAttribute("role", "toolbar");
@@ -2411,16 +2425,15 @@ export class LumenPdfView extends FileView {
       this.closeSelectionPalette();
     }));
     if (this.mobileRuntime) return;
-    const width = palette.offsetWidth || 390;
-    palette.style.left = `${clamp(pendingSelection.x - width / 2, 12, window.innerWidth - width - 12)}px`;
-    palette.style.top = `${clamp(pendingSelection.y + 12, 12, window.innerHeight - 96)}px`;
+    this.trackSelectionPalettePosition();
   }
 
   private showExtensionPalette(): void {
     if (!this.selection || !this.extensionGroupId) return;
     const pendingSelection = this.selection;
+    this.stopSelectionPalettePosition();
     this.selectionPalette?.remove();
-    const palette = this.detachedDocument().body.createDiv({ cls: "lumen-selection-palette lumen-extension-palette" });
+    const palette = this.containerEl.ownerDocument.body.createDiv({ cls: "lumen-selection-palette lumen-extension-palette" });
     this.prepareDetachedSurface(palette);
     if (this.mobileRuntime) {
       palette.setAttribute("role", "dialog");
@@ -2438,14 +2451,131 @@ export class LumenPdfView extends FileView {
       attr: { "aria-label": "Selected text preview", role: "status" },
     });
     if (this.mobileRuntime) return;
-    const width = palette.offsetWidth || 320;
-    const height = palette.offsetHeight || 88;
-    const below = pendingSelection.y + 12;
-    const top = below + height <= window.innerHeight - 12
-      ? below
-      : pendingSelection.y - height - 12;
-    palette.style.left = `${clamp(pendingSelection.x - width / 2, 12, window.innerWidth - width - 12)}px`;
-    palette.style.top = `${clamp(top, 12, window.innerHeight - height - 12)}px`;
+    this.trackSelectionPalettePosition();
+  }
+
+  private trackSelectionPalettePosition(): void {
+    const palette = this.selectionPalette;
+    const doc = this.containerEl.ownerDocument;
+    const viewWindow = doc.defaultView;
+    if (this.mobileRuntime || !palette || !viewWindow) return;
+    palette.classList.add("is-desktop-surface");
+    const update = () => this.scheduleSelectionPalettePosition();
+    // Capture scroll from ancestors too: a popout or enclosing workspace can
+    // move this pane without changing its own scroll offset.
+    doc.addEventListener("scroll", update, { capture: true, passive: true });
+    viewWindow.addEventListener("resize", update, { passive: true });
+    doc.addEventListener("selectionchange", update);
+    viewWindow.visualViewport?.addEventListener("resize", update, { passive: true });
+    viewWindow.visualViewport?.addEventListener("scroll", update, { passive: true });
+    const observer = new ResizeObserver(update);
+    observer.observe(this.scrollEl);
+    observer.observe(palette);
+    this.selectionPaletteCleanup = () => {
+      doc.removeEventListener("scroll", update, true);
+      viewWindow.removeEventListener("resize", update);
+      doc.removeEventListener("selectionchange", update);
+      viewWindow.visualViewport?.removeEventListener("resize", update);
+      viewWindow.visualViewport?.removeEventListener("scroll", update);
+      observer.disconnect();
+      viewWindow.cancelAnimationFrame(this.selectionPaletteRaf);
+      this.selectionPaletteRaf = 0;
+    };
+    this.positionSelectionPalette();
+  }
+
+  private stopSelectionPalettePosition(): void {
+    this.selectionPaletteCleanup?.();
+    this.selectionPaletteCleanup = null;
+  }
+
+  private scheduleSelectionPalettePosition(): void {
+    if (this.mobileRuntime || !this.selectionPalette || this.selectionPaletteRaf) return;
+    const viewWindow = this.containerEl.ownerDocument.defaultView;
+    if (!viewWindow) return;
+    this.selectionPaletteRaf = viewWindow.requestAnimationFrame(() => {
+      this.selectionPaletteRaf = 0;
+      const nativeSelection = viewWindow.getSelection();
+      const captured = this.selection?.nativeRange;
+      if (nativeSelection && !nativeSelection.isCollapsed && nativeSelection.rangeCount && captured) {
+        const range = nativeSelection.getRangeAt(0);
+        if (this.pagesEl.contains(range.startContainer) && this.pagesEl.contains(range.endContainer)
+          && (range.startContainer !== captured.startContainer || range.startOffset !== captured.startOffset
+            || range.endContainer !== captured.endContainer || range.endOffset !== captured.endOffset)) {
+          this.captureSelection();
+          return;
+        }
+      }
+      this.positionSelectionPalette();
+    });
+  }
+
+  private positionSelectionPalette(): void {
+    const palette = this.selectionPalette;
+    const selectedPages = this.selection?.paletteBounds;
+    const viewWindow = this.containerEl.ownerDocument.defaultView;
+    if (this.mobileRuntime || !palette || !selectedPages?.length || !viewWindow) return;
+    const viewport = viewWindow.visualViewport;
+    const viewportLeft = viewport?.offsetLeft ?? 0;
+    const viewportTop = viewport?.offsetTop ?? 0;
+    const scroll = this.scrollEl.getBoundingClientRect();
+    const root = this.rootEl.getBoundingClientRect();
+    const toolbar = this.toolbarEl.getBoundingClientRect();
+    const bounds: PaletteRect = {
+      left: Math.max(viewportLeft, scroll.left, root.left),
+      right: Math.min(viewportLeft + (viewport?.width ?? viewWindow.innerWidth), scroll.left + this.scrollEl.clientWidth, root.right),
+      top: Math.max(viewportTop, scroll.top, root.top, toolbar.bottom),
+      bottom: Math.min(viewportTop + (viewport?.height ?? viewWindow.innerHeight), scroll.top + this.scrollEl.clientHeight, root.bottom),
+    };
+    // A fully offscreen pane has no usable intersection on that axis. Keep
+    // controls reachable in the viewport until the reader comes back into view.
+    if (bounds.right <= bounds.left) {
+      bounds.left = viewportLeft;
+      bounds.right = viewportLeft + (viewport?.width ?? viewWindow.innerWidth);
+    }
+    if (bounds.bottom <= bounds.top) {
+      bounds.top = viewportTop;
+      bounds.bottom = viewportTop + (viewport?.height ?? viewWindow.innerHeight);
+    }
+    const horizontalMargin = Math.min(SELECTION_PALETTE_MARGIN, (bounds.right - bounds.left) / 4);
+    const verticalMargin = Math.min(SELECTION_PALETTE_MARGIN, (bounds.bottom - bounds.top) / 4);
+    bounds.left += horizontalMargin;
+    bounds.right -= horizontalMargin;
+    bounds.top += verticalMargin;
+    bounds.bottom -= verticalMargin;
+    const pageBounds = visibleSelectionPages(selectedPages,
+      this.scrollEl.scrollTop + bounds.top - scroll.top,
+      this.scrollEl.scrollTop + bounds.bottom - scroll.top,
+      (page, edge) => {
+        const shell = this.pages.get(page.page)?.shell;
+        return shell ? shell.offsetTop + page[edge] * shell.offsetHeight : 0;
+      });
+    if (!pageBounds) return;
+    let anchor: PaletteRect | null = null;
+    for (const page of new Set(pageBounds)) {
+      const stage = this.pages.get(page.page)?.shell.getBoundingClientRect();
+      if (!stage) continue;
+      const rect = {
+        left: stage.left + page.left * stage.width,
+        right: stage.left + page.right * stage.width,
+        top: stage.top + page.top * stage.height,
+        bottom: stage.top + page.bottom * stage.height,
+      };
+      anchor = anchor ? {
+        left: Math.min(anchor.left, rect.left), right: Math.max(anchor.right, rect.right),
+        top: Math.min(anchor.top, rect.top), bottom: Math.max(anchor.bottom, rect.bottom),
+      } : rect;
+    }
+    if (!anchor) return;
+    const maxWidth = `${Math.min(bounds.right - bounds.left, palette.classList.contains("lumen-extension-palette") ? 340 : Infinity)}px`;
+    const maxHeight = `${bounds.bottom - bounds.top}px`;
+    if (palette.style.maxWidth !== maxWidth) palette.style.maxWidth = maxWidth;
+    if (palette.style.maxHeight !== maxHeight) palette.style.maxHeight = maxHeight;
+    const size = palette.getBoundingClientRect();
+    const position = selectionPalettePosition(anchor, bounds, size.width, size.height);
+    palette.style.left = `${position.left}px`;
+    palette.style.top = `${position.top}px`;
+    palette.dataset.placement = position.placement;
   }
 
   private commitExtension(): void {
@@ -3456,11 +3586,12 @@ export class LumenPdfView extends FileView {
   }
 
   private closeSelectionPalette(): void {
+    this.stopSelectionPalettePosition();
     this.selectionPalette?.remove();
     this.selectionPalette = null;
     this.selection = null;
     if (this.mobileRuntime) this.containerEl.ownerDocument.defaultView?.getSelection()?.removeAllRanges();
-    else window.getSelection()?.removeAllRanges();
+    else this.containerEl.ownerDocument.defaultView?.getSelection()?.removeAllRanges();
   }
 
   private closeEditor(): void {
