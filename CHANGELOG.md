@@ -2,6 +2,12 @@
 
 All notable changes to Lumen PDF Annotator are documented here.
 
+## 1.0.33 — 2026-11-03
+
+- Anchor the desktop selection palette to selected text in either drag direction, with a 16px gap below when space allows. Switch above as space changes and keep the controls within the viewport and reader pane, including multiline and multipage selections.
+- Keep the palette available when selecting text again, including reversing over the same text, while a plain click still dismisses it.
+- Coalesce placement updates during scrolling and resizing, using bounded geometry reads without rerendering the PDF or annotation canvases.
+
 ## 1.0.32 — 2026-11-02
 
 - Match the editable current-page number to the existing total-page text size on desktop, phone, and tablet. Keep the native number input, support four-digit page counts, and retain a 16px native input font on mobile to avoid iOS focus zoom.
