@@ -697,6 +697,22 @@
   padding: 6px 7px;
   border-radius: 13px;
 }
+.lumen-selection-palette.is-desktop-surface {
+  box-sizing: border-box;
+  flex-wrap: wrap;
+  justify-content: center;
+  width: max-content;
+  overflow: auto;
+}
+.lumen-selection-palette.is-desktop-surface .lumen-color-row,
+.lumen-selection-palette.is-desktop-surface .lumen-selection-styles {
+  flex-wrap: wrap;
+  min-width: 0;
+  max-width: 100%;
+}
+.lumen-extension-palette.is-desktop-surface .lumen-extension-preview {
+  min-width: 0;
+}
 .lumen-selection-palette .lumen-color-row {
   gap: 5px;
   padding-right: 6px;

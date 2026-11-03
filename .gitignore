@@ -4,6 +4,7 @@ test/*
 !test/*.test.mjs
 !test/browser-mobile-harness.mjs
 !test/browser-mobile-harness.html
+!test/browser-palette-harness.html
 tmp/
 *.log
 .DS_Store
