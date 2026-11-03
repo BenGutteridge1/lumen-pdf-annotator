@@ -2,6 +2,12 @@
 
 All notable changes to Lumen PDF Annotator are documented here.
 
+## 1.0.34 — 2026-11-03
+
+- Remember each PDF's chosen annotation colour across highlights and restarts. PDFs without a saved choice use the vault's default annotation colour, initially Yellow.
+- Float the compact 276 × 38 px mobile palette beside selected text. Open a separate vertical picker for the other four colours, with a theme-accent outline around the current swatch.
+- Reuse the PDF's existing metadata read for colour memory and reposition the palette without rendering PDF pages again.
+
 ## 1.0.33 — 2026-11-03
 
 - Anchor the desktop selection palette to selected text in either drag direction, with a 16px gap below when space allows. Switch above as space changes and keep the controls within the viewport and reader pane, including multiline and multipage selections.
