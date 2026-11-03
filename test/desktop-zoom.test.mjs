@@ -381,6 +381,43 @@ function renderer({ mobile = false, count = 10, ViewClass, roundedOffsets = fals
   return { view, scheduler, scrollEl, rootEl, reads: () => reads };
 }
 
+test('desktop palette dismissal allows a fresh reverse selection over the same text and keeps a plain click dismissed', () => {
+  const { view, scheduler, scrollEl, rootEl } = renderer();
+  const native = { isCollapsed: true, quote: '', removeAllRanges() { this.isCollapsed = true; } };
+  scheduler.getSelection = () => native;
+  const captures = [];
+  view.captureSelection = () => {
+    if (native.isCollapsed) return;
+    captures.push(native.quote);
+    view.selectionPalette = new ElementFixture(rootEl.ownerDocument);
+  };
+  const release = () => scrollEl.dispatchEvent(Object.assign(new Event('mouseup'), { clientX: 500, clientY: 400 }));
+  const down = () => rootEl.dispatchEvent(new Event('pointerdown'));
+  down(); native.isCollapsed = false; native.quote = 'the same multiline quote'; release();
+  assert.ok(view.selectionPalette, 'the first forward drag opens the palette');
+  down();
+  assert.equal(view.selectionPalette, null); assert.equal(native.isCollapsed, true, 'dismissing clears the stale native range');
+  native.isCollapsed = false; release();
+  assert.ok(view.selectionPalette, 'a new reverse drag is captured after the old palette is dismissed');
+  assert.deepEqual(captures, ['the same multiline quote', 'the same multiline quote']);
+  down(); release();
+  assert.equal(view.selectionPalette, null, 'a plain click leaves no new range and cannot reopen stale controls');
+  assert.equal(captures.length, 2);
+});
+
+test('mobile still suppresses the selection capture immediately after tapping outside its palette', () => {
+  const { view, scheduler, rootEl } = renderer({ mobile: true });
+  const native = { isCollapsed: false, removeAllRanges() { this.isCollapsed = true; } };
+  scheduler.getSelection = () => native;
+  view.selectionPalette = new ElementFixture(rootEl.ownerDocument);
+  let captures = 0; view.captureSelection = () => { captures++; };
+  rootEl.dispatchEvent(new Event('pointerdown'));
+  assert.equal(view.selectionPalette, null); assert.equal(view.suppressNextSelectionCapture, true);
+  native.isCollapsed = false;
+  view.scheduleMobileSelectionCapture(); scheduler.advance(170);
+  assert.equal(captures, 0); assert.equal(view.suppressNextSelectionCapture, false);
+});
+
 test('mobile page navigation and current-page detection share stable clearance on short and notched viewports', () => {
   for (const clearance of [68,81,128]) {
     const { view, scrollEl } = renderer({mobile:true,count:20});

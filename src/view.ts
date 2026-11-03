@@ -811,10 +811,9 @@ export class LumenPdfView extends FileView {
       });
     } else {
       this.scrollEl.addEventListener("mouseup", event => {
-        if (this.suppressNextSelectionCapture) {
-          this.suppressNextSelectionCapture = false;
-          return;
-        }
+        // Pointerdown dismisses the old palette and clears its native range.
+        // A noncollapsed range here therefore belongs to a fresh selection,
+        // including a reverse drag over exactly the same text.
         this.captureSelection(event.clientX, event.clientY);
       });
     }
@@ -829,7 +828,7 @@ export class LumenPdfView extends FileView {
     this.rootEl.addEventListener("pointerdown", event => {
       const target = event.target as Node;
       if (this.selectionPalette && !this.selectionPalette.contains(target)) {
-        this.suppressNextSelectionCapture = true;
+        if (this.mobileRuntime) this.suppressNextSelectionCapture = true;
         this.closeSelectionPalette();
       }
       if (this.editor && !this.editor.contains(target) && !(target as Element).closest?.(".lumen-mark")) this.closeEditor();
