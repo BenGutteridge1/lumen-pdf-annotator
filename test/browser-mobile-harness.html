@@ -236,7 +236,24 @@ async function run() {
     const bytes = pdfBytes();
     const hash = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)), n => n.toString(16).padStart(2,'0')).join('');
     const files = new Map();
-    const vault = { adapter: { exists: async path => files.has(path), read: async path => { if (!files.has(path)) throw Error(`Missing ${path}`); return files.get(path); }, write: async (path,text) => files.set(path,text), mkdir: async path => files.set(path,''), append: async (path,text) => files.set(path,(files.get(path)||'')+text), list: async path => ({files:[...files.keys()].filter(file=>file.startsWith(`${path}/`)),folders:[]}) }, readBinary: async () => bytes.slice(0), getName: () => 'Synthetic test vault' };
+    const adapter = {
+      exists: async path => files.has(path),
+      read: async path => {
+        if (!files.has(path)) throw Error(`Missing ${path}`);
+        return files.get(path);
+      },
+      write: async (path,text) => files.set(path,text),
+      process: async (path,transform) => {
+        if (!files.has(path)) throw Error(`Missing ${path}`);
+        const updated = transform(files.get(path));
+        files.set(path,updated);
+        return updated;
+      },
+      mkdir: async path => files.set(path,''),
+      append: async (path,text) => files.set(path,(files.get(path)||'')+text),
+      list: async path => ({files:[...files.keys()].filter(file=>file.startsWith(`${path}/`)),folders:[]}),
+    };
+    const vault = { adapter, readBinary: async () => bytes.slice(0), getName: () => 'Synthetic test vault' };
     const localZoom = {desktop:new Map(),mobile:new Map()};
     const persistentKey = key => persistentToolbar && key.startsWith('lumen-pdf-annotator:mobile-toolbar:');
     const localStorageFor = mobile => ({

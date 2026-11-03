@@ -13,8 +13,9 @@ await build({
     import { PdfViewStateManager } from './src/view-state';
     import { ReadingPositionStore } from './src/reading-position';
     import { LumenSettingTab } from './src/main';
+    import { VaultAnnotationColour } from './src/annotation-colour';
     import { Platform, TFile } from 'obsidian';
-    window.LumenHarness = { LumenPdfView, PdfViewStateManager, ReadingPositionStore, LumenSettingTab, Platform, TFile };`,
+    window.LumenHarness = { LumenPdfView, PdfViewStateManager, ReadingPositionStore, LumenSettingTab, VaultAnnotationColour, Platform, TFile };`,
     resolveDir: process.cwd(), loader: 'ts' },
   outfile: path.join(output, 'harness.js'), bundle: true, format: 'iife', platform: 'browser', target: 'es2022',
   plugins: [{ name: 'harness-host', setup(builder) {
@@ -42,6 +43,14 @@ await build({
         'chevron-up': '<path d="m18 15-6-6-6 6"/>',
         'chevron-left': '<path d="m15 18-6-6 6-6"/>',
         'chevron-right': '<path d="m9 18 6-6-6-6"/>',
+        'highlighter': '<path d="m9 11-6 6v3h9l3-3"/><path d="m22 12-4.6 4.6a2 2 0 0 1-2.8 0l-5.2-5.2a2 2 0 0 1 0-2.8L14 4"/>',
+        'underline': '<path d="M6 4v6a6 6 0 0 0 12 0V4"/><line x1="4" y1="20" x2="20" y2="20"/>',
+        'ellipsis': '<circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/>',
+        'strikethrough': '<path d="M16 4H9a3 3 0 0 0-2.83 4"/><path d="M14 12a4 4 0 0 1 0 8H6"/><line x1="4" y1="12" x2="20" y2="12"/>',
+        'square': '<rect x="3" y="3" width="18" height="18" rx="2"/>',
+        'message-square': '<path d="M22 17a2 2 0 0 1-2 2H6.828a2 2 0 0 0-1.414.586l-2.202 2.202A.71.71 0 0 1 2 21.286V5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2z"/>',
+        'copy': '<rect x="8" y="8" width="14" height="14" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>',
+        'check': '<path d="M20 6 9 17l-5-5"/>',
         minus: '<path d="M5 12h14"/>',
         plus: '<path d="M5 12h14"/><path d="M12 5v14"/>',
         search: '<path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/>',

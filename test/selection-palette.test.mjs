@@ -19,7 +19,7 @@ async function bundle(entry, mobile = false) {
   });
   return import(`data:text/javascript;base64,${Buffer.from(result.outputFiles[0].contents).toString('base64')}`);
 }
-const { selectionPalettePosition: position, visibleSelectionPages } = await bundle('src/selection-palette.ts');
+const { selectionPalettePosition: position, visibleSelectionPages, mobileColourPickerPosition } = await bundle('src/selection-palette.ts');
 const { LumenPdfView } = await bundle('src/view.ts');
 const { LumenPdfView: MobilePdfView } = await bundle('src/view.ts', true);
 const bounds = { left: 112, top: 142, right: 988, bottom: 768 };
@@ -67,7 +67,7 @@ function fixture(View = LumenPdfView) {
   const rect = (left, top, width, height) => ({ left, top, right: left + width, bottom: top + height, width, height });
   const scroll = new EventTarget(); Object.assign(scroll, { scrollTop: 0, clientWidth: 900, clientHeight: 700,
     getBoundingClientRect: () => rect(100, 80, 900, scroll.clientHeight) });
-  const root = { getBoundingClientRect: () => rect(100, 80, 900, scroll.clientHeight) };
+  const root = { style: { getPropertyValue: () => '' }, getBoundingClientRect: () => rect(100, 80, 900, scroll.clientHeight) };
   let pageReads = 0, rangeReads = 0, removed = false;
   const shell = { offsetTop: 20, offsetHeight: 1000, getBoundingClientRect: () => {
     pageReads++; return rect(200, 100 - scroll.scrollTop, 700, 1000);
@@ -75,7 +75,7 @@ function fixture(View = LumenPdfView) {
   const classes = new Set();
   const palette = { style: {}, dataset: {}, classList: { add(name) { classes.add(name); }, contains: name => classes.has(name) },
     getBoundingClientRect: () => rect(0, 0, Math.min(450, parseFloat(palette.style.maxWidth) || 450), 50),
-    remove() { removed = true; } };
+    querySelector: () => null, remove() { removed = true; } };
   const view = new View({ app: { scope: {} }, containerEl: { ownerDocument: doc } });
   Object.assign(view, { rootEl: root, scrollEl: scroll, toolbarEl: { getBoundingClientRect: () => rect(300, 92, 500, 38) },
     pagesEl: { contains: () => true }, selectionPalette: palette,
@@ -161,7 +161,31 @@ test('native selection changes refresh geometry once and ignore collapsed palett
   item.setNative({ isCollapsed: true, rangeCount: 0 });
   item.doc.dispatchEvent(new Event('selectionchange')); item.frame(); assert.equal(captures, 1);
 });
-test('mobile keeps its existing palette layout and does not install desktop tracking', () => {
-  const item = fixture(MobilePdfView); item.view.trackSelectionPalettePosition(); item.view.scheduleSelectionPalettePosition(); item.view.positionSelectionPalette();
-  assert.deepEqual(item.palette.style, {}); assert.equal(item.observers.length, 0); assert.equal(item.frames.size, 0);
+test('mobile follows reader and visual viewport changes and cleans up on close', () => {
+  const item = fixture(MobilePdfView);
+  item.owner.visualViewport = Object.assign(new EventTarget(), { offsetTop: 60, offsetLeft: 50, width: 320, height: 650 });
+  item.view.trackSelectionPalettePosition();
+  assert.equal(item.palette.classList.contains('is-desktop-surface'), false);
+  assert.equal(item.palette.dataset.placement, 'below');
+  assert.equal(item.palette.style.maxWidth, '270px');
+  item.owner.visualViewport.height = 445;
+  for (let i = 0; i < 60; i++) item.owner.visualViewport.dispatchEvent(new Event('resize'));
+  assert.equal(item.frames.size, 1);
+  item.frame();
+  assert.equal(item.palette.dataset.placement, 'above');
+  assert.equal(item.counts().rangeReads, 0);
+  assert.equal(item.counts().pageReads, 2);
+  item.view.closeSelectionPalette();
+  item.owner.visualViewport.dispatchEvent(new Event('resize'));
+  assert.equal(item.frames.size, 0);
+  assert.equal(item.observers[0].disconnected, true);
+});
+
+test('mobile colour column anchors to the swatch, flips, clamps, and shortens without covering its row', () => {
+  const area = { left: 12, right: 332, top: 80, bottom: 680 };
+  const row = { left: 24, right: 300, top: 270, bottom: 308 };
+  assert.deepEqual(mobileColourPickerPosition(row, 46, area, 'below'), { left: 24, top: 316, height: 125, placement: 'below' });
+  assert.deepEqual(mobileColourPickerPosition(row, 46, area, 'above'), { left: 24, top: 137, height: 125, placement: 'above' });
+  assert.deepEqual(mobileColourPickerPosition(row, 20, { ...area, bottom: 390 }, 'below'), { left: 12, top: 137, height: 125, placement: 'above' });
+  assert.deepEqual(mobileColourPickerPosition(row, 330, { ...area, top: 210, bottom: 390 }, 'above'), { left: 288, top: 316, height: 74, placement: 'below' });
 });

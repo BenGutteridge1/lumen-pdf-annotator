@@ -71,3 +71,29 @@ export function visibleSelectionPages(
   }
   return [pages[first], pages[Math.max(first, low - 1)]];
 }
+
+export const MOBILE_COLOUR_PICKER_WIDTH = 44;
+export const MOBILE_COLOUR_PICKER_HEIGHT = 125;
+const MOBILE_COLOUR_PICKER_GAP = 8;
+
+/** Keep the column outside the row, even when its alternatives need scrolling. */
+export function mobileColourPickerPosition(
+  row: PaletteRect,
+  swatchCentre: number,
+  bounds: PaletteRect,
+  rowPlacement: "above" | "below",
+): { left: number; top: number; height: number; placement: "above" | "below" } {
+  const above = Math.max(0, row.top - bounds.top - MOBILE_COLOUR_PICKER_GAP);
+  const below = Math.max(0, bounds.bottom - row.bottom - MOBILE_COLOUR_PICKER_GAP);
+  const preferred = rowPlacement === "above" ? above : below;
+  const opposite = rowPlacement === "above" ? below : above;
+  const placement = preferred >= MOBILE_COLOUR_PICKER_HEIGHT || preferred >= opposite
+    ? rowPlacement : rowPlacement === "above" ? "below" : "above";
+  const height = Math.min(MOBILE_COLOUR_PICKER_HEIGHT, placement === "above" ? above : below);
+  return {
+    left: Math.max(bounds.left, Math.min(swatchCentre - MOBILE_COLOUR_PICKER_WIDTH / 2, bounds.right - MOBILE_COLOUR_PICKER_WIDTH)),
+    top: placement === "above" ? row.top - MOBILE_COLOUR_PICKER_GAP - height : row.bottom + MOBILE_COLOUR_PICKER_GAP,
+    height,
+    placement,
+  };
+}
