@@ -1,5 +1,5 @@
 import { normalizePath, TFile, Vault } from "obsidian";
-import { AnnotationIndex, AnnotationMutation, MARK_COLORS, MarkStyle, PdfAnnotation } from "./model";
+import { AnnotationIndex, AnnotationMutation, MARK_COLORS, MarkStyle, normalizePageLabel, PdfAnnotation } from "./model";
 import { writeAnnotationExport } from "./annotation-export";
 import { normalizeQuoteRanges } from "./annotation-text";
 import { AnnotationColour, annotationColour, AnnotationColourPreference } from "./annotation-colour";
@@ -246,11 +246,13 @@ function normalizeAnnotation(value: unknown): PdfAnnotation | null {
   // Unknown future offset schemes cannot safely be treated as original text.
   const quoteRanges = item.quoteRangeVersion === undefined ? normalizeQuoteRanges(item.quoteRanges) : undefined;
   const repairedQuoteRanges = item.quoteRangeVersion === 2 ? normalizeQuoteRanges(item.repairedQuoteRanges) : undefined;
+  const pageLabel = typeof item.pageLabel === "string" ? normalizePageLabel(item.pageLabel) : "";
   return {
     id: item.id,
     groupId: typeof item.groupId === "string" && item.groupId.trim() ? item.groupId : undefined,
     kind: item.kind === "page-note" ? "page-note" : "text",
     page,
+    ...(pageLabel ? { pageLabel } : {}),
     rects,
     quote: typeof item.quote === "string" ? item.quote : item.kind === "page-note" ? "Page note" : "",
     ...(quoteRanges ? { quoteRanges } : {}),
@@ -432,7 +434,12 @@ export class AnnotationRepository {
     }
   }
 
-  async exportReadable(index: AnnotationIndex, originalName: string): Promise<string> {
+  async exportReadable(
+    index: AnnotationIndex,
+    originalName: string,
+    showPrintedPageNumbers = false,
+    printedPageLabels?: readonly string[] | null,
+  ): Promise<string> {
     await this.flushJournal();
     const folder = ".lumen-pdf/exports";
     await ensureFolder(this.vault, folder);
@@ -441,7 +448,7 @@ export class AnnotationRepository {
     const base = `${folder}/${stem}-${this.hash.slice(0, 12)}-${time}`;
     let path = `${base}.annotations.md`;
     for (let copy = 2; await this.vault.adapter.exists(path); copy++) path = `${base}-${copy}.annotations.md`;
-    await writeAnnotationExport(this.vault, path, index, this.pdfPath);
+    await writeAnnotationExport(this.vault, path, index, this.pdfPath, showPrintedPageNumbers, printedPageLabels);
     return path;
   }
 }
@@ -614,10 +621,18 @@ export async function listAnnotationBundles(vault: Vault): Promise<AnnotationBun
   return bundles.sort((a, b) => a.manifest.workingPath.localeCompare(b.manifest.workingPath));
 }
 
-export async function exportAnnotationBundle(vault: Vault, bundle: AnnotationBundleInfo): Promise<{ path: string; count: number }> {
+export async function exportAnnotationBundle(
+  vault: Vault,
+  bundle: AnnotationBundleInfo,
+  showPrintedPageNumbers = false,
+  printedPageLabels?: readonly string[] | null,
+): Promise<{ path: string; count: number }> {
   const repository = new AnnotationRepository(vault, bundle.folder, bundle.hash, bundle.manifest.workingPath);
   const index = await repository.load();
-  return { path: await repository.exportReadable(index, bundle.manifest.originalName), count: index.logicalSize };
+  return {
+    path: await repository.exportReadable(index, bundle.manifest.originalName, showPrintedPageNumbers, printedPageLabels),
+    count: index.logicalSize,
+  };
 }
 
 export async function verifyBundle(vault: Vault, bundle: BundleInfo): Promise<BackupVerification> {

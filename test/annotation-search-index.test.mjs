@@ -90,8 +90,8 @@ class VaultFixture {
   }
 }
 
-function source(index, pdfPath = 'Books/Example.pdf') {
-  return { hash, folder: '.lumen-pdf/bundles/sha256/' + hash, pdfPath, index, flush: async () => undefined };
+function source(index, pdfPath = 'Books/Example.pdf', pageLabels = null) {
+  return { hash, folder: '.lumen-pdf/bundles/sha256/' + hash, pdfPath, index, pageLabels, flush: async () => undefined };
 }
 
 function host(vault) {
@@ -161,6 +161,59 @@ test('cross-page highlights stay grouped and page notes include their note text'
   assert.equal(text.match(/one grouped note/g)?.length, 1);
   assert.match(text, /margin observation/);
   assert.equal(text.match(/annotation=group\b/g)?.length, 3);
+  service.dispose();
+});
+
+test('manually entered page labels stay visible with either printed page preference', async () => {
+  const vault = new VaultFixture();
+  const index = new AnnotationIndex();
+  const saved = annotation('saved-label', { page: 58, pageLabel: '30' });
+  index.put(saved);
+  const pageLabels = Array.from({ length: 99 }, (_, page) => String(page + 1));
+  pageLabels[57] = '44';
+  const service = new AnnotationSearchIndex(host(vault), () => [source(index, 'Books/Example.pdf', pageLabels)], false);
+
+  await service.setEnabled(true);
+  let text = vault.generated()[0][1].content;
+  assert.match(text, /## Page 30 · Highlight/);
+  assert.doesNotMatch(text, /## Page 58 · Highlight/);
+  assert.doesNotMatch(text, /## Page 44 · Highlight/);
+
+  await service.setShowPrintedPageNumbers(true);
+  text = vault.generated()[0][1].content;
+  assert.match(text, /## Page 30 · Highlight/);
+  assert.equal(index.get('saved-label').page, 58);
+  assert.equal(index.get('saved-label').pageLabel, '30');
+
+  await service.setShowPrintedPageNumbers(false);
+  text = vault.generated()[0][1].content;
+  assert.match(text, /## Page 30 · Highlight/);
+  assert.doesNotMatch(text, /## Page 58 · Highlight/);
+  assert.equal(index.get('saved-label').pageLabel, '30');
+  service.dispose();
+});
+
+test('printed PDF page labels follow the preference for highlights without manual labels', async () => {
+  const vault = new VaultFixture();
+  const index = new AnnotationIndex();
+  index.put(annotation('physical-58', { page: 58 }));
+  const pageLabels = Array.from({ length: 99 }, (_, page) => String(page + 1));
+  pageLabels[57] = '44';
+  const service = new AnnotationSearchIndex(host(vault), () => [source(index, 'Books/Example.pdf', pageLabels)], false);
+
+  await service.setEnabled(true);
+  let text = vault.generated()[0][1].content;
+  assert.match(text, /## Page 58 · Highlight/);
+
+  await service.setShowPrintedPageNumbers(true);
+  text = vault.generated()[0][1].content;
+  assert.match(text, /## Page 44 · Highlight/);
+  assert.equal(index.get('physical-58').page, 58);
+  assert.equal(index.get('physical-58').pageLabel, undefined);
+
+  await service.setShowPrintedPageNumbers(false);
+  text = vault.generated()[0][1].content;
+  assert.match(text, /## Page 58 · Highlight/);
   service.dispose();
 });
 

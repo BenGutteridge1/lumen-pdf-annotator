@@ -2,10 +2,11 @@ import { FileView, Menu, Notice, Platform, Scope, setIcon, TFile, WorkspaceLeaf 
 import type { PDFDocumentProxy, PDFPageProxy, PDFWorker, RenderTask, TextContent, TextItem } from "pdfjs-dist/types/src/display/api";
 import type { TextLayer } from "pdfjs-dist/types/src/display/text_layer";
 import { annotationMarkdownLink } from "./links";
-import { AnnotationIndex, AnnotationQuoteRange, MARK_COLORS, MarkStyle, newAnnotation, newPageNote, NormalizedRect, PdfAnnotation } from "./model";
+import { AnnotationIndex, AnnotationQuoteRange, MARK_COLORS, MarkStyle, newAnnotation, newPageNote, normalizePageLabel, NormalizedRect, PdfAnnotation } from "./model";
 import { buildQuoteTextRuns, extendAnnotationQuote, normalizeQuoteText, quoteAnchorFields, quoteFromPageRanges, quoteRangesForSlices, quoteRangeVersionForItems, QuoteRangeVersion, QuoteRunSlice, QuoteTextRun } from "./annotation-text";
 import { annotationTarget, comparableFileName, QuoteAnnotationRecord, quoteAnnotations } from "./legacy";
 import { loadPdf } from "./pdf-runtime";
+import { displayPageNumber } from "./page-labels";
 import { DesktopPdfZoom } from "./desktop-zoom";
 import { MobilePdfZoom } from "./mobile-zoom";
 import { mobileColourPickerPosition, PaletteRect, SELECTION_PALETTE_MARGIN, SelectionPageBounds, selectionPalettePosition, visibleSelectionPages } from "./selection-palette";
@@ -262,6 +263,7 @@ function markLabel(style: MarkStyle): string {
 export class LumenPdfView extends FileView {
   private readonly mobileRuntime = Platform.isMobile;
   private pdfDocument: PDFDocumentProxy | null = null;
+  private pdfPageLabels: string[] | null = null;
   private pdfWorker: PDFWorker | null = null;
   private workerPort: Worker | null = null;
   private bundle: DocumentBundle | null = null;
@@ -376,6 +378,7 @@ export class LumenPdfView extends FileView {
     private readonly onAnnotationsChanged?: (source: AnnotationSearchSource) => void,
     private readonly toolbarPreferences?: MobileToolbarPreferences,
     private readonly vaultAnnotationColour?: AnnotationColourPreference,
+    private showPrintedPageNumbers = false,
   ) {
     super(leaf);
     this.theme = initialTheme;
@@ -428,6 +431,7 @@ export class LumenPdfView extends FileView {
       folder: bundle.folder,
       pdfPath: this.file.path,
       index: this.index,
+      pageLabels: this.pdfPageLabels,
       flush: () => bundle.repository.flushJournal(),
     };
   }
@@ -506,6 +510,9 @@ export class LumenPdfView extends FileView {
     if (mobileIndex && "error" in mobileIndex) throw mobileIndex.error;
     try {
       const loaded = await loadPdf(bytes, this.mobileRuntime);
+      let pageLabels: string[] | null = null;
+      try { pageLabels = await loaded.document.getPageLabels(); }
+      catch (error) { console.warn("Lumen could not read PDF page labels", error); }
       if (generation !== this.documentGeneration) {
         try { await loaded.document?.destroy?.(); } catch { /* a newer document owns the view */ }
         try { await Promise.resolve(loaded.worker?.destroy?.()); } catch { /* already gone */ }
@@ -513,6 +520,7 @@ export class LumenPdfView extends FileView {
         return;
       }
       this.pdfDocument = loaded.document;
+      this.pdfPageLabels = pageLabels;
       this.pdfWorker = loaded.worker;
       this.workerPort = loaded.port;
       this.documentHash = bundle.hash;
@@ -693,7 +701,7 @@ export class LumenPdfView extends FileView {
 
   async exportAnnotations(): Promise<string | null> {
     if (!this.bundle || !this.file) return null;
-    return this.bundle.repository.exportReadable(this.index, this.file.name);
+    return this.bundle.repository.exportReadable(this.index, this.file.name, this.showPrintedPageNumbers, this.pdfPageLabels);
   }
 
   private buildShell(file: TFile): void {
@@ -1834,6 +1842,26 @@ export class LumenPdfView extends FileView {
     this.syncDetachedTheme(this.selectionPalette);
     this.syncDetachedTheme(this.editor);
     if (changed) this.onThemeChange?.(theme);
+  }
+
+  setShowPrintedPageNumbers(show: boolean): void {
+    if (this.showPrintedPageNumbers === show) return;
+    this.showPrintedPageNumbers = show;
+    const labels = [
+      ...(this.rootEl?.querySelectorAll<HTMLElement>(".lumen-editor-page-number, .lumen-detail-page-number") ?? []),
+      ...(this.editor?.querySelectorAll<HTMLElement>(".lumen-editor-page-number") ?? []),
+    ];
+    for (const label of labels) {
+      const id = label.dataset.annotationId;
+      const prefix = label.dataset.pagePrefix;
+      const annotation = id ? this.index.get(id) : undefined;
+      if (!annotation || prefix === undefined) continue;
+      label.textContent = this.annotationPageLabel(annotation, prefix);
+      label.setAttribute("aria-label", `Edit ${this.annotationPageLabel(annotation, "page number ")}`);
+    }
+    // Preserve an inline edit if the user has it focused while changing the
+    // setting. The list will be refreshed when that edit is committed/cancelled.
+    if (!this.inspector?.querySelector(".lumen-page-number-input")) this.refreshInspector();
   }
 
   private syncDetachedTheme(surface: HTMLElement | null): void {
@@ -3082,7 +3110,7 @@ export class LumenPdfView extends FileView {
     }
     this.editor = editor;
     const heading = editor.createDiv({ cls: "lumen-editor-heading" });
-    heading.createSpan({ text: this.annotationPageLabel(annotation, "Page ") });
+    this.createEditablePageNumber(heading, annotation, "Page ", "lumen-editor-page-number");
     heading.append(iconButton("x", "Close editor", () => this.closeEditor()));
     this.populateEditor(editor, annotation, true);
     if (this.mobileRuntime) {
@@ -3142,6 +3170,78 @@ export class LumenPdfView extends FileView {
     const remove = iconButton("trash-2", "Delete annotation", () => this.deleteAnnotation(annotation.id));
     remove.addClass("is-danger");
     actions.append(remove);
+  }
+
+  private createEditablePageNumber(parent: HTMLElement, annotation: PdfAnnotation, prefix: string, className: string): HTMLSpanElement {
+    const label = parent.createSpan({ cls: className, text: this.annotationPageLabel(annotation, prefix) });
+    label.dataset.annotationId = annotation.id;
+    label.dataset.pagePrefix = prefix;
+    label.tabIndex = 0;
+    label.setAttribute("role", "button");
+    label.setAttribute("aria-label", `Edit ${this.annotationPageLabel(annotation, "page number ")}`);
+    const startEditing = (event: Event) => {
+      event.stopPropagation();
+      this.beginPageNumberEdit(label, annotation, prefix);
+    };
+    label.addEventListener("click", startEditing);
+    label.addEventListener("keydown", event => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      startEditing(event);
+    });
+    return label;
+  }
+
+  private beginPageNumberEdit(
+    label: HTMLElement,
+    annotation: PdfAnnotation,
+    prefix: string,
+    refreshInspectorAfterSave = false,
+  ): void {
+    if (!label.isConnected) return;
+    const input = label.ownerDocument.createElement("input");
+    input.type = "text";
+    input.className = "lumen-page-number-input";
+    input.maxLength = 40;
+    input.value = this.annotationPageEditValue(annotation);
+    input.setAttribute("aria-label", "Page number");
+    input.autocomplete = "off";
+    input.spellcheck = false;
+    input.addEventListener("click", event => event.stopPropagation());
+    let userEdited = false;
+    input.addEventListener("input", () => { userEdited = true; });
+    input.addEventListener("keydown", event => {
+      event.stopPropagation();
+      if (event.key === "Enter") {
+        event.preventDefault();
+        finish(true);
+      } else if (event.key === "Escape") {
+        event.preventDefault();
+        finish(false);
+      }
+    });
+    label.replaceWith(input);
+    let finished = false;
+    const finish = (save: boolean) => {
+      if (finished) return;
+      finished = true;
+      if (save && userEdited) {
+        const pageLabel = normalizePageLabel(input.value);
+        this.mutateAnnotation(annotation.id, { pageLabel: pageLabel || undefined }, false, false);
+      }
+      if (refreshInspectorAfterSave) {
+        this.refreshInspector();
+        return;
+      }
+      const latest = this.index.get(annotation.id) ?? annotation;
+      label.textContent = this.annotationPageLabel(latest, prefix);
+      label.setAttribute("aria-label", `Edit ${this.annotationPageLabel(latest, "page number ")}`);
+      input.replaceWith(label);
+      if (save && userEdited) this.refreshInspector();
+    };
+    input.addEventListener("blur", () => finish(true));
+    input.focus();
+    input.select();
   }
 
   private beginExtension(annotation: PdfAnnotation): void {
@@ -3318,7 +3418,27 @@ export class LumenPdfView extends FileView {
       card.style.setProperty("--mark-color", item.color);
       const meta = card.createDiv({ cls: "lumen-card-meta" });
       const pageLabel = this.annotationPageLabel(item, "p.");
-      this.appendInspectorSearchText(meta.createEl("strong"), pageLabel, query);
+      const pageNumber = meta.createEl("strong", { cls: "lumen-card-page-number" });
+      pageNumber.dataset.annotationId = item.id;
+      this.appendInspectorSearchText(pageNumber, pageLabel, query);
+      pageNumber.tabIndex = 0;
+      pageNumber.setAttribute("role", "button");
+      pageNumber.setAttribute("aria-label", `Edit ${this.annotationPageLabel(item, "page number ")}`);
+      pageNumber.addEventListener("click", event => {
+        event.stopPropagation();
+        this.beginPageNumberEdit(pageNumber, item, "p.", true);
+      });
+      pageNumber.addEventListener("keydown", event => {
+        if (event.key !== "Enter" && event.key !== " ") return;
+        event.preventDefault();
+        event.stopPropagation();
+        this.beginPageNumberEdit(pageNumber, item, "p.", true);
+      });
+      const editPage = iconButton("pencil", "Edit page number", () => {
+        this.beginPageNumberEdit(pageNumber, item, "p.", true);
+      });
+      editPage.addClass("lumen-page-label-edit");
+      meta.append(editPage);
       meta.createSpan({ text: item.kind === "page-note" ? "page note" : item.note ? "note" : markLabel(item.style) });
       if (query) {
         const tags = item.tags.join(" ");
@@ -3367,7 +3487,7 @@ export class LumenPdfView extends FileView {
       detail.remove();
       this.refreshInspector();
     }));
-    header.createSpan({ text: this.annotationPageLabel(annotation, "Page ") });
+    this.createEditablePageNumber(header, annotation, "Page ", "lumen-detail-page-number");
     this.populateEditor(detail, annotation, false);
   }
 
@@ -3382,12 +3502,23 @@ export class LumenPdfView extends FileView {
     }, 420);
   }
 
+  private annotationPageValue(annotation: PdfAnnotation): string {
+    const members = this.index.inGroup(annotation.id);
+    const customLabel = members.find(item => item.pageLabel?.trim())?.pageLabel?.trim();
+    return displayPageNumber(
+      members.map(item => item.page),
+      customLabel,
+      this.showPrintedPageNumbers,
+      this.pdfPageLabels,
+    ) || String(annotation.page);
+  }
+
+  private annotationPageEditValue(annotation: PdfAnnotation): string {
+    return this.annotationPageValue(annotation);
+  }
+
   private annotationPageLabel(annotation: PdfAnnotation, prefix: string): string {
-    const pages = Array.from(new Set(this.index.inGroup(annotation.id).map(item => item.page))).sort((a, b) => a - b);
-    if (!pages.length) return `${prefix}${annotation.page}`;
-    if (pages.length === 1) return `${prefix}${pages[0]}`;
-    const consecutive = pages.every((page, index) => index === 0 || page === pages[index - 1] + 1);
-    return consecutive ? `${prefix}${pages[0]}–${pages.at(-1)}` : `${prefix}${pages.join(", ")}`;
+    return `${prefix}${this.annotationPageValue(annotation)}`;
   }
 
   private async runSearch(rawQuery: string): Promise<void> {
@@ -4048,6 +4179,7 @@ export class LumenPdfView extends FileView {
     try { await Promise.resolve(this.pdfWorker?.destroy?.()); } catch { /* already gone */ }
     this.workerPort?.terminate();
     this.pdfDocument = null;
+    this.pdfPageLabels = null;
     this.pdfWorker = null;
     this.workerPort = null;
     this.bundle = null;

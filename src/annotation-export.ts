@@ -1,6 +1,7 @@
 import type { Vault } from "obsidian";
 import { annotationUri } from "./links";
 import type { AnnotationIndex, PdfAnnotation } from "./model";
+import { displayPageNumber } from "./page-labels";
 
 interface ExportEntry {
   anchor: PdfAnnotation;
@@ -16,8 +17,15 @@ function quoteLines(value: string): string[] {
   return value.trim().split(/\r?\n/).map(line => `> ${line}`);
 }
 
-function pageLabel(pages: number[]): string {
-  return pages.length === 1 ? `Page ${pages[0]}` : `Pages ${pages.join(", ")}`;
+function displayPageLabel(
+  members: PdfAnnotation[],
+  pages: number[],
+  showPrintedPageNumbers: boolean,
+  printedPageLabels?: readonly string[] | null,
+): string {
+  const manual = members.find(item => item.pageLabel?.trim())?.pageLabel?.trim();
+  const value = displayPageNumber(pages, manual, showPrintedPageNumbers, printedPageLabels);
+  return (manual || pages.length === 1 ? "Page " : "Pages ") + value;
 }
 
 function styleLabel(annotation: PdfAnnotation): string {
@@ -40,7 +48,14 @@ async function exportEntries(index: AnnotationIndex): Promise<ExportEntry[]> {
 }
 
 /** A human-readable export. Recovery snapshots remain a separate, lossless format. */
-export async function writeAnnotationExport(vault: Vault, path: string, index: AnnotationIndex, pdfPath: string): Promise<number> {
+export async function writeAnnotationExport(
+  vault: Vault,
+  path: string,
+  index: AnnotationIndex,
+  pdfPath: string,
+  showPrintedPageNumbers = false,
+  printedPageLabels?: readonly string[] | null,
+): Promise<number> {
   const entries = await exportEntries(index);
   const partialPath = `${path}.partial`;
   const header = [
@@ -61,7 +76,7 @@ export async function writeAnnotationExport(vault: Vault, path: string, index: A
         currentPage = pages[0];
         batch.push(`## Page ${currentPage}`, "");
       }
-      batch.push(`### ${entryNumber + 1}. ${styleLabel(anchor)} · ${pageLabel(pages)}`, "");
+      batch.push(`### ${entryNumber + 1}. ${styleLabel(anchor)} · ${displayPageLabel(members, pages, showPrintedPageNumbers, printedPageLabels)}`, "");
       const quoted = members.filter(item => item.kind !== "page-note" && item.quote.trim());
       for (const member of quoted) {
         if (pages.length > 1) batch.push(`*Page ${member.page}*`, "");

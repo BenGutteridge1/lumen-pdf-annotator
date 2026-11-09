@@ -17,6 +17,7 @@ interface LumenSettings {
   automaticPdfBackups: boolean;
   indexAnnotations: boolean;
   mobileToolbarDefault: "expanded" | "collapsed";
+  showPrintedPageNumbers: boolean;
 }
 
 const DEFAULT_SETTINGS: LumenSettings = {
@@ -26,6 +27,7 @@ const DEFAULT_SETTINGS: LumenSettings = {
   automaticPdfBackups: false,
   indexAnnotations: false,
   mobileToolbarDefault: "expanded",
+  showPrintedPageNumbers: false,
 };
 
 function isPdfTheme(value: unknown): value is PdfTheme {
@@ -42,6 +44,7 @@ function readSettings(value: unknown): LumenSettings {
     automaticPdfBackups: typeof stored.automaticPdfBackups === "boolean" ? stored.automaticPdfBackups : DEFAULT_SETTINGS.automaticPdfBackups,
     indexAnnotations: typeof stored.indexAnnotations === "boolean" ? stored.indexAnnotations : DEFAULT_SETTINGS.indexAnnotations,
     mobileToolbarDefault: stored.mobileToolbarDefault === "collapsed" ? "collapsed" : "expanded",
+    showPrintedPageNumbers: typeof stored.showPrintedPageNumbers === "boolean" ? stored.showPrintedPageNumbers : DEFAULT_SETTINGS.showPrintedPageNumbers,
   };
 }
 
@@ -60,7 +63,8 @@ export default class LumenPdfPlugin extends Plugin {
     this.settings = readSettings(await this.loadData() as unknown);
     this.viewState = new PdfViewStateManager(this);
     this.annotationColour = new VaultAnnotationColour(this.app.vault);
-    await Promise.all([this.viewState.load(), this.annotationColour.load()]);
+    await Promise.all([this.viewState.load(), this.annotationColour.load(this.settings.showPrintedPageNumbers)]);
+    this.settings.showPrintedPageNumbers = this.annotationColour.showPrintedPageNumbers;
     this.annotationSearch = new AnnotationSearchIndex(this.app, () => {
       const sources: AnnotationSearchSource[] = [];
       for (const leaf of this.app.workspace.getLeavesOfType(LUMEN_VIEW_TYPE)) {
@@ -69,7 +73,8 @@ export default class LumenPdfPlugin extends Plugin {
         if (source) sources.push(source);
       }
       return sources;
-    }, this.settings.indexAnnotations, () => new Notice("Lumen could not update some annotation search copies. See the developer console.", 8_000));
+    }, this.settings.indexAnnotations, () => new Notice("Lumen could not update some annotation search copies. See the developer console.", 8_000), this.settings.showPrintedPageNumbers);
+    this.register(this.annotationColour.subscribePrintedPageNumbers(enabled => { void this.applyShowPrintedPageNumbers(enabled); }));
     this.registerView(LUMEN_VIEW_TYPE, leaf => new LumenPdfView(
       leaf,
       this.settings.pdfTheme,
@@ -86,6 +91,7 @@ export default class LumenPdfPlugin extends Plugin {
         save: (hash, collapsed) => this.viewState.toolbar.save(hash, collapsed),
       },
       this.annotationColour,
+      this.settings.showPrintedPageNumbers,
     ));
     if (this.settings.defaultViewer) this.installAsDefaultPdfViewer();
     this.registerObsidianProtocolHandler(LUMEN_PROTOCOL_ACTION, params => void this.openAnnotationLink(params).catch(error => {
@@ -241,8 +247,26 @@ export default class LumenPdfPlugin extends Plugin {
     await this.annotationSearch.setEnabled(enabled);
   }
 
+  async setShowPrintedPageNumbers(enabled: boolean): Promise<void> {
+    const indexUpdate = this.applyShowPrintedPageNumbers(enabled);
+    await Promise.all([
+      this.annotationColour.savePrintedPageNumbers(enabled),
+      indexUpdate,
+    ]);
+  }
+
+  private applyShowPrintedPageNumbers(enabled: boolean): Promise<void> {
+    this.settings.showPrintedPageNumbers = enabled;
+    for (const leaf of this.app.workspace.getLeavesOfType(LUMEN_VIEW_TYPE)) {
+      if (leaf.view instanceof LumenPdfView) leaf.view.setShowPrintedPageNumbers(enabled);
+    }
+    return this.annotationSearch?.setShowPrintedPageNumbers(enabled) ?? Promise.resolve();
+  }
+
   saveSettings(): Promise<void> {
-    return this.saveMergedData({ ...this.settings });
+    const settings: Record<string, unknown> = { ...this.settings };
+    delete settings.showPrintedPageNumbers;
+    return this.saveMergedData(settings);
   }
 
   private saveMergedData(patch: Record<string, unknown>): Promise<void> {
@@ -251,6 +275,7 @@ export default class LumenPdfPlugin extends Plugin {
       const existing = typeof loaded === "object" && loaded !== null && !Array.isArray(loaded)
         ? loaded as Record<string, unknown>
         : {};
+      delete existing.showPrintedPageNumbers;
       await this.saveData({ ...existing, ...patch });
     });
     this.dataWrite = write;
@@ -334,6 +359,11 @@ export class LumenSettingTab extends PluginSettingTab {
         control: { type: "dropdown", key: "defaultAnnotationColour", options: ANNOTATION_COLOUR_NAMES, defaultValue: DEFAULT_ANNOTATION_COLOUR },
       },
       {
+        name: "Use printed page numbers",
+        desc: "Choose whether annotation pages use printed page numbers or their positions in the PDF. Manually entered page numbers are always displayed, regardless of this preference.",
+        control: { type: "toggle", key: "showPrintedPageNumbers", defaultValue: DEFAULT_SETTINGS.showPrintedPageNumbers },
+      },
+      {
         name: "Default mobile toolbar",
         desc: "Start new PDFs with the tools row expanded or collapsed. Each PDF remembers its last state on this device, including after Obsidian restarts.",
         control: { type: "dropdown", key: "mobileToolbarDefault", options: { expanded: "Expanded", collapsed: "Collapsed" }, defaultValue: DEFAULT_SETTINGS.mobileToolbarDefault },
@@ -377,6 +407,7 @@ export class LumenSettingTab extends PluginSettingTab {
     if (key === "mobileToolbarDefault") return this.plugin.settings.mobileToolbarDefault;
     if (key === "legacyAnnotationFolder") return this.plugin.settings.legacyAnnotationFolder;
     if (key === "automaticPdfBackups") return this.plugin.settings.automaticPdfBackups;
+    if (key === "showPrintedPageNumbers") return this.plugin.settings.showPrintedPageNumbers;
     return undefined;
   }
 
@@ -406,6 +437,9 @@ export class LumenSettingTab extends PluginSettingTab {
     if (key === "automaticPdfBackups" && typeof value === "boolean") {
       this.plugin.settings.automaticPdfBackups = value;
       return this.plugin.saveSettings();
+    }
+    if (key === "showPrintedPageNumbers" && typeof value === "boolean") {
+      return this.plugin.setShowPrintedPageNumbers(value);
     }
   }
 }
@@ -510,7 +544,10 @@ class AnnotationExportModal extends Modal {
     for (const bundle of chosen) {
       this.statusEl.setText(`Exporting ${exported + failures.length + 1} of ${chosen.length}: ${bundle.manifest.originalName}`);
       try {
-        await exportAnnotationBundle(this.plugin.app.vault, bundle);
+        const printedPageLabels = this.plugin.app.workspace.getLeavesOfType(LUMEN_VIEW_TYPE)
+          .map(leaf => leaf.view instanceof LumenPdfView ? leaf.view.getAnnotationSearchSource() : null)
+          .find(source => source?.hash === bundle.hash)?.pageLabels;
+        await exportAnnotationBundle(this.plugin.app.vault, bundle, this.plugin.settings.showPrintedPageNumbers, printedPageLabels);
         exported++;
       } catch (error) {
         failures.push(bundle.manifest.originalName);

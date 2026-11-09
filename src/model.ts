@@ -19,6 +19,8 @@ export interface PdfAnnotation {
   groupId?: string;
   kind?: "text" | "page-note";
   page: number;
+  /** Optional printed page label; `page` remains the PDF navigation anchor. */
+  pageLabel?: string;
   rects: NormalizedRect[];
   quote: string;
   // Optional, additive anchors. Older snapshots/readers still use `quote`.
@@ -33,6 +35,15 @@ export interface PdfAnnotation {
   style: MarkStyle;
   createdAt: number;
   updatedAt: number;
+}
+
+export function normalizePageLabel(value: string): string {
+  let clean = "";
+  for (const character of value) {
+    const code = character.charCodeAt(0);
+    clean += code < 32 || code === 127 ? " " : character;
+  }
+  return clean.replace(/\s+/g, " ").trim().slice(0, 40);
 }
 
 export type AnnotationMutation =
@@ -109,7 +120,7 @@ export class AnnotationIndex {
     // instead of sorting the full collection after every edit.
     if (previous) this.items.delete(annotation.id);
     this.items.set(annotation.id, annotation);
-    this.searchable.set(annotation.id, `${annotation.quote}\u0000${annotation.note}\u0000${annotation.tags.join(" ")}\u0000${annotation.page}`.toLowerCase());
+    this.searchable.set(annotation.id, `${annotation.quote}\u0000${annotation.note}\u0000${annotation.tags.join(" ")}\u0000${annotation.pageLabel ?? ""}\u0000${annotation.page}`.toLowerCase());
     let pageIds = this.pages.get(annotation.page);
     if (!pageIds) {
       pageIds = new Set();

@@ -2,6 +2,12 @@
 
 All notable changes to Lumen PDF Annotator are documented here.
 
+## 1.0.35 — 2026-11-09
+
+- Edit annotation page numbers from annotation cards and editors on desktop and mobile.
+- Choose whether annotation pages display their PDF positions or the PDF's printed page labels. Manually entered page numbers remain visible regardless of this preference, which is stored in the vault.
+- Keep annotation colour filters visible without hovering.
+
 ## 1.0.34 — 2026-11-03
 
 - Remember each PDF's chosen annotation colour across highlights and restarts. PDFs without a saved choice use the vault's default annotation colour, initially Yellow.

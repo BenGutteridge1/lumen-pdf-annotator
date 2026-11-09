@@ -1,5 +1,6 @@
 import { App, TFile, TFolder } from "obsidian";
 import { annotationUri } from "./links";
+import { displayPageNumber } from "./page-labels";
 import type { AnnotationIndex, PdfAnnotation } from "./model";
 import { AnnotationRepository, listAnnotationBundles } from "./storage";
 
@@ -13,6 +14,7 @@ export interface AnnotationSearchSource {
   folder: string;
   pdfPath: string;
   index: AnnotationIndex;
+  pageLabels?: readonly string[] | null;
   flush: () => Promise<void>;
 }
 
@@ -47,9 +49,11 @@ function searchNotePath(hash: string, pdfPath: string, part: number): string {
     + "--" + String(part).padStart(4, "0") + ".md";
 }
 
-function pageLabel(members: PdfAnnotation[]): string {
+function pageLabel(members: PdfAnnotation[], showPrintedPageNumbers: boolean, printedPageLabels?: readonly string[] | null): string {
+  const custom = members.find(item => item.pageLabel?.trim())?.pageLabel?.trim();
   const pages = Array.from(new Set(members.map(item => item.page))).sort((a, b) => a - b);
-  return pages.length === 1 ? "Page " + pages[0] : "Pages " + pages.join(", ");
+  const value = displayPageNumber(pages, custom, showPrintedPageNumbers, printedPageLabels);
+  return (custom || pages.length === 1 ? "Page " : "Pages ") + value;
 }
 
 function renderSearchNote(
@@ -59,6 +63,8 @@ function renderSearchNote(
   anchors: PdfAnnotation[],
   index: AnnotationIndex,
   part: number,
+  showPrintedPageNumbers: boolean,
+  printedPageLabels?: readonly string[] | null,
 ): string {
   const lines = [
     marker(hash),
@@ -75,7 +81,7 @@ function renderSearchNote(
     const target = anchor.groupId || anchor.id;
     const link = "[Open annotation in Lumen](" + annotationUri(vaultName, pdfPath, target) + ")";
     let hasLink = false;
-    lines.push("## " + pageLabel(members) + " · " + (anchor.kind === "page-note" ? "Page note" : "Highlight"), "");
+    lines.push("## " + pageLabel(members, showPrintedPageNumbers, printedPageLabels) + " · " + (anchor.kind === "page-note" ? "Page note" : "Highlight"), "");
     for (const member of members) {
       if (member.kind === "page-note" || !member.quote.trim()) continue;
       if (members.length > 1) lines.push("Page " + member.page, "");
@@ -103,6 +109,7 @@ function renderSearchNote(
 /** A disposable, searchable Markdown copy. The annotation repository remains authoritative. */
 export class AnnotationSearchIndex {
   private enabled: boolean;
+  private showPrintedPageNumbers: boolean;
   private generation = 0;
   private pending = new Map<string, AnnotationSearchSource>();
   private timer: number | null = null;
@@ -115,8 +122,10 @@ export class AnnotationSearchIndex {
     private readonly openSources: () => AnnotationSearchSource[],
     enabled: boolean,
     private readonly onError?: () => void,
+    showPrintedPageNumbers = false,
   ) {
     this.enabled = enabled;
+    this.showPrintedPageNumbers = showPrintedPageNumbers;
   }
 
   private get vault() {
@@ -143,6 +152,19 @@ export class AnnotationSearchIndex {
     if (enabled) this.reportedError = false;
     if (enabled) this.enqueue(() => this.rebuild(generation));
     else this.enqueue(() => this.removeAll(generation));
+    return this.work;
+  }
+
+  setShowPrintedPageNumbers(show: boolean): Promise<void> {
+    if (show === this.showPrintedPageNumbers) return this.work;
+    this.showPrintedPageNumbers = show;
+    if (!this.enabled) return this.work;
+    const generation = ++this.generation;
+    if (this.timer !== null) window.clearTimeout(this.timer);
+    if (this.startupTimer !== null) window.clearTimeout(this.startupTimer);
+    this.timer = this.startupTimer = null;
+    this.pending.clear();
+    this.enqueue(() => this.rebuild(generation));
     return this.work;
   }
 
@@ -244,7 +266,7 @@ export class AnnotationSearchIndex {
       const part = Math.floor(offset / ANNOTATIONS_PER_NOTE) + 1;
       const path = searchNotePath(source.hash, source.pdfPath, part);
       const content = renderSearchNote(source.hash, source.pdfPath, this.vault.getName(),
-        anchors.slice(offset, offset + ANNOTATIONS_PER_NOTE), index, part);
+        anchors.slice(offset, offset + ANNOTATIONS_PER_NOTE), index, part, this.showPrintedPageNumbers, source.pageLabels);
       const existing = this.vault.getAbstractFileByPath(path);
       if (existing && !(existing instanceof TFile)) throw new Error("The annotation index note path is occupied by a folder: " + path);
       if (existing) {

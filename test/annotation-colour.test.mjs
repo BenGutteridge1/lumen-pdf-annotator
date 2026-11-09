@@ -90,6 +90,27 @@ test('vault default and independent PDF colours survive a new session without pe
   assert.deepEqual(reopenedVault.processes, []);
 });
 
+test('printed page number preference is stored in shared vault preferences and preserves the vault colour', async t => {
+  const data = await fixture(t);
+  const firstVault = data.vault();
+  const firstDevice = new VaultAnnotationColour(firstVault);
+  await firstDevice.load();
+  assert.equal(firstDevice.showPrintedPageNumbers, false);
+  await firstDevice.save(blue);
+  await firstDevice.savePrintedPageNumbers(true);
+
+  const secondDevice = new VaultAnnotationColour(data.vault());
+  await secondDevice.load();
+  assert.equal(secondDevice.showPrintedPageNumbers, true);
+  assert.equal(secondDevice.colour, blue);
+
+  await secondDevice.savePrintedPageNumbers(false);
+  const reopenedDevice = new VaultAnnotationColour(data.vault());
+  await reopenedDevice.load();
+  assert.equal(reopenedDevice.showPrintedPageNumbers, false);
+  assert.equal(reopenedDevice.colour, blue);
+});
+
 test('same-hash views observe choices immediately and serialized writes preserve rename metadata', async t => {
   const data = await fixture(t);
   const vault = data.vault();
