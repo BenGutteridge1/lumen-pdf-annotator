@@ -2,6 +2,10 @@
 
 All notable changes to Lumen PDF Annotator are documented here.
 
+## 1.0.36 — 2026-11-09
+
+- Use Obsidian's element helper when creating the editable annotation page-number input.
+
 ## 1.0.35 — 2026-11-09
 
 - Edit annotation page numbers from annotation cards and editors on desktop and mobile.

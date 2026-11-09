@@ -3199,9 +3199,8 @@ export class LumenPdfView extends FileView {
     refreshInspectorAfterSave = false,
   ): void {
     if (!label.isConnected) return;
-    const input = label.ownerDocument.createElement("input");
+    const input = label.createEl("input", { cls: "lumen-page-number-input" });
     input.type = "text";
-    input.className = "lumen-page-number-input";
     input.maxLength = 40;
     input.value = this.annotationPageEditValue(annotation);
     input.setAttribute("aria-label", "Page number");
